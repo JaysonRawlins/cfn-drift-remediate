@@ -1,0 +1,23 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Test stack for cfn-drift-remediate integration testing
+
+Resources:
+  TestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cfn-drift-test-queue
+      VisibilityTimeout: 30
+      MessageRetentionPeriod: 345600
+      Tags:
+        - Key: Environment
+          Value: test
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  QueueUrl:
+    Description: URL of the test queue
+    Value: !Ref TestQueue
+  QueueArn:
+    Description: ARN of the test queue
+    Value: !GetAtt TestQueue.Arn

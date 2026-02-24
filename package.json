@@ -1,5 +1,13 @@
 {
   "name": "@jjrawlins/cfn-drift-remediate",
+  "description": "CLI tool to remediate CloudFormation drift by re-importing drifted resources with their actual state",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JaysonRawlins/cfn-drift-remediate.git"
+  },
+  "bin": {
+    "cfn-drift-remediate": "lib/index.js"
+  },
   "scripts": {
     "build": "npx projen build",
     "bump": "npx projen bump",
@@ -20,9 +28,15 @@
     "watch": "npx projen watch",
     "projen": "npx projen"
   },
+  "author": {
+    "name": "Jayson Rawlins",
+    "email": "jayson.rawlins@gmail.com",
+    "organization": false
+  },
   "devDependencies": {
     "@stylistic/eslint-plugin": "^2",
     "@types/jest": "^30.0.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.0.10",
     "@typescript-eslint/eslint-plugin": "^8",
     "@typescript-eslint/parser": "^8",
@@ -38,11 +52,26 @@
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   },
+  "dependencies": {
+    "@aws-sdk/client-cloudformation": "^3.975.0",
+    "@aws-sdk/credential-providers": "^3.975.0",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.2",
+    "ora": "^9.1.0",
+    "yaml-cfn": "^0.3.2"
+  },
+  "engines": {
+    "node": ">= 20.19.0"
+  },
   "main": "lib/index.js",
   "license": "Apache-2.0",
   "version": "0.0.0",
   "jest": {
     "coverageProvider": "v8",
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/test/integration/"
+    ],
     "testMatch": [
       "<rootDir>/@(src|test)/**/*(*.)@(spec|test).ts?(x)",
       "<rootDir>/@(src|test)/**/__tests__/**/*.ts?(x)",
@@ -60,10 +89,8 @@
     ],
     "coverageDirectory": "coverage",
     "coveragePathIgnorePatterns": [
-      "/node_modules/"
-    ],
-    "testPathIgnorePatterns": [
-      "/node_modules/"
+      "/node_modules/",
+      "/test/integration/"
     ],
     "watchPathIgnorePatterns": [
       "/node_modules/"
