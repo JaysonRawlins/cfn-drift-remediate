@@ -100,10 +100,10 @@ The tool supports ~100 CloudFormation resource types that are eligible for impor
 ## Development
 
 ```bash
-yarn build          # Full pipeline: projen synth, compile, test, package
-yarn compile        # TypeScript compile only
-yarn test           # Run Jest unit tests + ESLint
-yarn watch          # Watch mode
+npx projen build    # Full pipeline: projen synth → compile → test → package
+npx projen compile  # TypeScript compile only
+npx projen test     # Run Jest unit tests + ESLint
+npx projen watch    # Watch mode
 ```
 
 This project uses [projen](https://projen.io/). Edit `.projenrc.ts` and run `npx projen` to regenerate config files.
