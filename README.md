@@ -1,6 +1,6 @@
 # cfn-drift-remediate
 
-CLI tool that remediates AWS CloudFormation stack drift. Detects drifted resources, safely removes them from the stack (with `DeletionPolicy: Retain`), then re-imports them with their actual current state.
+CLI tool that remediates AWS CloudFormation stack drift. Detects drifted resources, safely removes them from the stack (with `DeletionPolicy: Retain`), then re-imports them with their actual current state. Supports interactive and plan-based workflows.
 
 ## Install
 
