@@ -210,23 +210,57 @@ describe('promptForDecisions', () => {
 });
 
 describe('displayCascadeWarning', () => {
-  it('should not print anything when no cascade removals', () => {
-    displayCascadeWarning([]);
+  it('should not print anything when both lists are empty', () => {
+    displayCascadeWarning([], []);
     expect(console.log).not.toHaveBeenCalled();
   });
 
-  it('should display cascade removal details', () => {
+  it('should display permanent cascade removal details', () => {
     displayCascadeWarning([
       {
         logicalResourceId: 'SGIngress',
         resourceType: 'AWS::EC2::SecurityGroupIngress',
         dependsOn: 'DB',
       },
-    ]);
+    ], []);
     expect(console.log).toHaveBeenCalled();
     const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
     expect(output).toContain('SGIngress');
     expect(output).toContain('DB');
-    expect(output).toContain('1 additional resource(s)');
+    expect(output).toContain('permanently removed');
+  });
+
+  it('should display temporary cascade removal details', () => {
+    displayCascadeWarning([], [
+      {
+        logicalResourceId: 'TargetGroup',
+        resourceType: 'AWS::ElasticLoadBalancingV2::TargetGroup',
+        dependsOn: 'WebServer',
+      },
+    ]);
+    expect(console.log).toHaveBeenCalled();
+    const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
+    expect(output).toContain('TargetGroup');
+    expect(output).toContain('temporarily removed from the stack');
+  });
+
+  it('should display both permanent and temporary removals', () => {
+    displayCascadeWarning(
+      [{
+        logicalResourceId: 'SGIngress',
+        resourceType: 'AWS::EC2::SecurityGroupIngress',
+        dependsOn: 'DB',
+      }],
+      [{
+        logicalResourceId: 'LambdaPerm',
+        resourceType: 'AWS::Lambda::Permission',
+        dependsOn: 'Function',
+      }],
+    );
+    const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
+    expect(output).toContain('permanently removed');
+    expect(output).toContain('temporarily removed from the stack');
+    expect(output).toContain('SGIngress');
+    expect(output).toContain('LambdaPerm');
   });
 });

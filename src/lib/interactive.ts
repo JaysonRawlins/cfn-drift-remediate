@@ -156,24 +156,48 @@ export async function confirmActions(decisions: InteractiveDecisions): Promise<b
 /**
  * Display a warning about resources that will be cascade-removed
  * because they reference resources being removed.
+ *
+ * @param permanentRemovals - Resources permanently removed (depend on user-removed resources)
+ * @param temporaryRemovals - Resources temporarily removed and recreated (depend on autofix/reimport resources)
  */
-export function displayCascadeWarning(cascadeRemovals: CascadeRemoval[]): void {
-  if (cascadeRemovals.length === 0) return;
+export function displayCascadeWarning(
+  permanentRemovals: CascadeRemoval[],
+  temporaryRemovals: CascadeRemoval[],
+): void {
+  if (permanentRemovals.length === 0 && temporaryRemovals.length === 0) return;
 
-  console.log(chalk.bold.yellow(
-    `\nWarning: ${cascadeRemovals.length} additional resource(s) will be removed from the stack due to broken references:`,
-  ));
-
-  for (const removal of cascadeRemovals) {
-    console.log(chalk.yellow(
-      `  - ${removal.logicalResourceId} (${removal.resourceType})` +
-      chalk.dim(` references removed resource ${removal.dependsOn}`),
+  if (permanentRemovals.length > 0) {
+    console.log(chalk.bold.yellow(
+      `\nWarning: ${permanentRemovals.length} additional resource(s) will be permanently removed from the stack due to broken references:`,
+    ));
+    for (const removal of permanentRemovals) {
+      console.log(chalk.yellow(
+        `  - ${removal.logicalResourceId} (${removal.resourceType})` +
+        chalk.dim(` references removed resource ${removal.dependsOn}`),
+      ));
+    }
+    console.log(chalk.dim(
+      '\nThese resources have Ref/GetAtt references to permanently removed resources and cannot remain in the stack.',
+    ));
+    console.log(chalk.dim(
+      'Also remove them from your source template (CDK/CFN) to prevent them being recreated on next deploy.\n',
     ));
   }
 
-  console.log(chalk.dim(
-    '\nThese resources have Ref/GetAtt references to resources being removed and cannot remain in the stack.\n',
-  ));
+  if (temporaryRemovals.length > 0) {
+    console.log(chalk.bold.cyan(
+      `\nNote: ${temporaryRemovals.length} dependent resource(s) will be temporarily removed from the stack during remediation:`,
+    ));
+    for (const removal of temporaryRemovals) {
+      console.log(chalk.cyan(
+        `  - ${removal.logicalResourceId} (${removal.resourceType})` +
+        chalk.dim(` references ${removal.dependsOn}`),
+      ));
+    }
+    console.log(chalk.dim(
+      '\nThese resources reference resources being reimported and will be restored when the original template is applied.\n',
+    ));
+  }
 }
 
 /**

@@ -1,5 +1,6 @@
 import { typescript, TextFile } from 'projen';
 import { GithubCredentials } from 'projen/lib/github';
+import { NpmAccess } from 'projen/lib/javascript';
 
 const minNodeVersion = '20.19.0';
 
@@ -20,8 +21,11 @@ const project = new typescript.TypeScriptProject({
     'cfn-drift-remediate': 'lib/index.js',
   },
 
-  // NPM Publishing disabled for beta — re-enable when ready for public release
-  releaseToNpm: false,
+  // NPM Publishing via OIDC trusted publishing (beta dist-tag)
+  releaseToNpm: true,
+  npmAccess: NpmAccess.PUBLIC,
+  npmDistTag: 'beta',
+  npmTrustedPublishing: true,
 
   // GitHub Options
   githubOptions: {
@@ -75,12 +79,17 @@ const project = new typescript.TypeScriptProject({
   },
 });
 
-// NOTE: When re-enabling npm publishing, restore these overrides:
-// - npmAccess: NpmAccess.PUBLIC
-// - releaseToNpm: true
-// - npmTrustedPublishing: true
-// - Node 24 override for release_npm job
-// - OIDC permissions for release_npm job
+// Release workflow overrides for OIDC trusted publishing
+const releaseWorkflow = project.github!.tryFindWorkflow('release')!;
+releaseWorkflow.file!.addOverride('jobs.release.permissions.id-token', 'write');
+releaseWorkflow.file!.addOverride('jobs.release.permissions.contents', 'write');
+releaseWorkflow.file!.addOverride('jobs.release_npm.permissions.id-token', 'write');
+releaseWorkflow.file!.addOverride('jobs.release_npm.permissions.contents', 'write');
+// Override node-version to 24 for npm trusted publishing (requires npm 11.5.1+)
+releaseWorkflow.file!.addOverride('jobs.release_npm.steps.0.with.node-version', '24');
+// Add --ignore-engines to yarn install since Node 24 is outside the engines range (20.x)
+releaseWorkflow.file!.addOverride('jobs.release_npm.steps.4.run',
+  'cd .repo && yarn install --check-files --frozen-lockfile --ignore-engines');
 
 // .tool-versions file for asdf
 new TextFile(project, '.tool-versions', {

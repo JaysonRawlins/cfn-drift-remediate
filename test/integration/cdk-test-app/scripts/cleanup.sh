@@ -54,13 +54,30 @@ else
   echo "Step 2: No original DB found in stack outputs (skipped)"
 fi
 
-# Step 3: Destroy the CDK stack
+# Step 3: Empty S3 bucket (required for DESTROY removal policy)
+BUCKET_NAME=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$REGION" \
+  --profile "$PROFILE" \
+  --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" \
+  --output text 2>/dev/null || echo "")
+
+if [ -n "$BUCKET_NAME" ] && [ "$BUCKET_NAME" != "None" ]; then
+  echo "Step 3: Emptying S3 bucket: $BUCKET_NAME ..."
+  aws s3 rm "s3://$BUCKET_NAME" --recursive \
+    --region "$REGION" \
+    --profile "$PROFILE" 2>/dev/null || echo "  (bucket empty or already deleted)"
+else
+  echo "Step 3: No S3 bucket found in stack outputs (skipped)"
+fi
+
+# Step 4: Destroy the CDK stack
 echo ""
-echo "Step 3: Destroying CDK stack: $STACK_NAME ..."
+echo "Step 4: Destroying CDK stack: $STACK_NAME ..."
 cd "$(dirname "$0")/.."
 npx cdk destroy --force 2>/dev/null || true
 
-# Step 4: If CDK destroy fails, force-delete via CloudFormation
+# Step 5: If CDK destroy fails, force-delete via CloudFormation
 STACK_STATUS=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
   --region "$REGION" \
@@ -93,9 +110,9 @@ if [ "$STACK_STATUS" != "GONE" ] && [ "$STACK_STATUS" != "DELETE_COMPLETE" ]; th
     --profile "$PROFILE" 2>/dev/null || echo "  (timed out or already gone)"
 fi
 
-# Step 5: Clean up local backup files
+# Step 6: Clean up local backup files
 echo ""
-echo "Step 4: Cleaning up local files..."
+echo "Step 6: Cleaning up local files..."
 rm -f "$(dirname "$0")/../../../.cfn-drift-remediate-backup-"*.json
 rm -f "$(dirname "$0")/../../../../.cfn-drift-remediate-backup-"*.json
 

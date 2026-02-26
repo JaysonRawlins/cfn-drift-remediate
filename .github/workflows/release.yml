@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     outputs:
       latest_commit: ${{ steps.git_remote.outputs.latest_commit }}
       tag_exists: ${{ steps.check_tag_exists.outputs.exists }}
@@ -61,7 +62,9 @@ jobs:
           overwrite: true
   release_github:
     name: Publish to GitHub Releases
-    needs: release
+    needs:
+      - release
+      - release_npm
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -82,3 +85,31 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: errout=$(mktemp); gh release create $(cat dist/releasetag.txt) -R $GITHUB_REPOSITORY -F dist/changelog.md -t $(cat dist/releasetag.txt) --target $GITHUB_SHA 2> $errout && true; exitcode=$?; if [ $exitcode -ne 0 ] && ! grep -q "Release.tag_name already exists" $errout; then cat $errout; exit $exitcode; fi
+  release_npm:
+    name: Publish to npm
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    if: needs.release.outputs.tag_exists != 'true' && needs.release.outputs.latest_commit == github.sha
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - name: Download build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: build-artifact
+          path: dist
+      - name: Restore build artifact permissions
+        run: cd dist && setfacl --restore=permissions-backup.acl
+        continue-on-error: true
+      - name: Release
+        env:
+          NPM_DIST_TAG: beta
+          NPM_REGISTRY: registry.npmjs.org
+          NPM_CONFIG_PROVENANCE: "true"
+          NPM_TRUSTED_PUBLISHER: "true"
+        run: npx -p publib@latest publib-npm
+      - run: cd .repo && yarn install --check-files --frozen-lockfile --ignore-engines
