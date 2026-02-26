@@ -93,5 +93,6 @@ new TextFile(project, '.tool-versions', {
 
 // Ignore runtime backup files created by cfn-drift-remediate
 project.gitignore.addPatterns('.cfn-drift-remediate-backup-*');
+project.npmignore?.addPatterns('.cfn-drift-remediate-backup-*');
 
 project.synth();
