@@ -27,8 +27,32 @@ EC2_INSTANCE_ID=$(aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='Ec2InstanceId'].OutputValue" \
   --output text)
 
+BUCKET_NAME=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$REGION" \
+  --profile "$PROFILE" \
+  --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" \
+  --output text)
+
+LAMBDA_NAME=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$REGION" \
+  --profile "$PROFILE" \
+  --query "Stacks[0].Outputs[?OutputKey=='LambdaFunctionName'].OutputValue" \
+  --output text)
+
+RULE_NAME=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$REGION" \
+  --profile "$PROFILE" \
+  --query "Stacks[0].Outputs[?OutputKey=='EventRuleName'].OutputValue" \
+  --output text)
+
 echo "Original DB Identifier: $DB_IDENTIFIER"
 echo "EC2 Instance ID: $EC2_INSTANCE_ID"
+echo "S3 Bucket: $BUCKET_NAME"
+echo "Lambda Function: $LAMBDA_NAME"
+echo "EventBridge Rule: $RULE_NAME"
 echo ""
 
 # Get RDS instance details for replacement creation
@@ -102,6 +126,42 @@ aws ec2 create-tags \
   --region "$REGION" \
   --profile "$PROFILE"
 
+# Step 4: Make S3 bucket public (creates MODIFIED drift on PublicAccessBlockConfiguration)
+echo ""
+echo "Step 4: Making S3 bucket public: $BUCKET_NAME"
+echo "  Disabling public access block (creates MODIFIED drift)"
+aws s3api put-public-access-block \
+  --bucket "$BUCKET_NAME" \
+  --public-access-block-configuration \
+    BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false \
+  --region "$REGION" \
+  --profile "$PROFILE"
+
+echo "  Adding public read bucket policy"
+aws s3api put-bucket-policy \
+  --bucket "$BUCKET_NAME" \
+  --policy "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"PublicRead\",\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::${BUCKET_NAME}/*\"}]}" \
+  --region "$REGION" \
+  --profile "$PROFILE"
+
+# Step 5: Disable EventBridge rule (creates MODIFIED drift on State)
+echo ""
+echo "Step 5: Disabling EventBridge rule: $RULE_NAME"
+aws events disable-rule \
+  --name "$RULE_NAME" \
+  --region "$REGION" \
+  --profile "$PROFILE"
+
+# Step 6: Modify Lambda timeout (creates MODIFIED drift on Timeout)
+echo ""
+echo "Step 6: Modifying Lambda timeout: $LAMBDA_NAME"
+echo "  Changing timeout from 30s to 60s"
+aws lambda update-function-configuration \
+  --function-name "$LAMBDA_NAME" \
+  --timeout 60 \
+  --region "$REGION" \
+  --profile "$PROFILE" > /dev/null
+
 # Get replacement DB ARN
 NEW_DB_ARN=$(aws rds describe-db-instances \
   --db-instance-identifier "$NEW_DB_IDENTIFIER" \
@@ -116,11 +176,14 @@ echo ""
 echo "Drift summary:"
 echo "  1. DELETED: RDS DB Instance (was: $DB_IDENTIFIER)"
 echo "  2. MODIFIED: EC2 Instance tags ($EC2_INSTANCE_ID)"
+echo "  3. MODIFIED: S3 Bucket public access ($BUCKET_NAME)"
+echo "  4. MODIFIED: EventBridge Rule disabled ($RULE_NAME)"
+echo "  5. MODIFIED: Lambda timeout changed ($LAMBDA_NAME)"
 echo ""
 echo "Replacement DB:"
 echo "  Identifier: $NEW_DB_IDENTIFIER"
 echo "  ARN: $NEW_DB_ARN"
 echo ""
 echo "When running remediation:"
-echo "  - For MODIFIED EC2: choose 'Autofix'"
+echo "  - For MODIFIED EC2/S3/Lambda/EventBridge: choose 'Autofix'"
 echo "  - For DELETED RDS: choose 'Re-import', enter: $NEW_DB_IDENTIFIER"
