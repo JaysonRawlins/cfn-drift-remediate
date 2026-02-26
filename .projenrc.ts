@@ -87,6 +87,8 @@ releaseWorkflow.file!.addOverride('jobs.release_npm.permissions.id-token', 'writ
 releaseWorkflow.file!.addOverride('jobs.release_npm.permissions.contents', 'write');
 // Override node-version to 24 for npm trusted publishing (requires npm 11.5.1+)
 releaseWorkflow.file!.addOverride('jobs.release_npm.steps.0.with.node-version', '24');
+// Set registry-url so setup-node configures .npmrc for OIDC token exchange
+releaseWorkflow.file!.addOverride('jobs.release_npm.steps.0.with.registry-url', 'https://registry.npmjs.org');
 // Add --ignore-engines to yarn install since Node 24 is outside the engines range (20.x)
 releaseWorkflow.file!.addOverride('jobs.release_npm.steps.4.run',
   'cd .repo && yarn install --check-files --frozen-lockfile --ignore-engines');
