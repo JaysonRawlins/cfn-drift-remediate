@@ -91,6 +91,9 @@ new TextFile(project, '.tool-versions', {
   ],
 });
 
+// Exclude integration test CDK app from ESLint (has its own dependencies)
+project.eslint?.addIgnorePattern('test/integration/');
+
 // Ignore runtime backup files created by cfn-drift-remediate
 project.gitignore.addPatterns('.cfn-drift-remediate-backup-*');
 project.npmignore?.addPatterns('.cfn-drift-remediate-backup-*');

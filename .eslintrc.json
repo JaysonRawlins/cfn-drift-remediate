@@ -40,6 +40,7 @@
     "node_modules/",
     "*.generated.ts",
     "coverage",
+    "test/integration/",
     "!.projenrc.ts",
     "!projenrc/**/*.ts"
   ],
