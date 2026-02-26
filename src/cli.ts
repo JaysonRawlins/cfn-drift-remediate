@@ -4,6 +4,7 @@ import { Ora } from 'ora';
 import { CfnClientWrapper } from './lib/cfn-client';
 import { isResourceImportable, getAllRequiredCapabilities } from './lib/eligible-resources';
 import { promptForDecisions } from './lib/interactive';
+import { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';
 import { buildResourcesToImport, buildReimportDescriptor } from './lib/resource-importer';
 import {
   parseTemplate,
@@ -19,11 +20,21 @@ import {
   RemediationResult,
   RecoveryCheckpoint,
   DriftedResource,
+  InteractiveDecisions,
   ResourceToImport,
 } from './lib/types';
 import { deepClone } from './lib/utils';
 
 const DEFAULT_CAPABILITIES = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'];
+
+function packageVersion(): string {
+  try {
+    const pkgPath = path.join(__dirname, '..', 'package.json');
+    return JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version;
+  } catch {
+    return 'unknown';
+  }
+}
 
 /**
  * Main remediation function that orchestrates the drift remediation process
@@ -66,65 +77,100 @@ export async function remediate(
       console.log(`Found stack: ${stackInfo.stackName} (${stackInfo.stackId})`);
     }
 
-    // Step 2: Detect drift
-    log('Detecting stack drift...');
-    const detectionId = await client.detectDrift(stackInfo.stackId);
+    // Steps 2-4: Detect drift and collect decisions (or load from plan)
+    let allDriftedResources: DriftedResource[];
+    let decisions: InteractiveDecisions;
 
-    log('Waiting for drift detection to complete...');
-    const detectionResult = await client.waitForDriftDetection(detectionId);
+    if (options.applyPlan) {
+      // Apply a previously exported plan — skip drift detection and prompting
+      log('Loading remediation plan...');
+      const planJson = fs.readFileSync(path.resolve(options.applyPlan), 'utf-8');
+      const plan = loadPlan(planJson, options.stackName);
+      const loaded = planToDecisions(plan);
+      allDriftedResources = loaded.allDriftedResources;
+      decisions = loaded.decisions;
 
-    if (detectionResult.status !== 'DETECTION_COMPLETE') {
-      result.errors.push(`Drift detection did not complete: ${detectionResult.status}`);
-      return result;
-    }
+      if (spinner) spinner.start('Processing...');
+    } else {
+      // Normal flow: detect drift and prompt interactively
 
-    if (detectionResult.driftStatus === 'IN_SYNC') {
-      if (spinner) spinner.succeed('Stack is in sync - no drift detected');
-      result.success = true;
-      return result;
-    }
+      // Step 2: Detect drift
+      log('Detecting stack drift...');
+      const detectionId = await client.detectDrift(stackInfo.stackId);
 
-    // Step 3: Get drifted resources and separate by type
-    log('Analyzing drifted resources...');
-    const allDriftedResources = await client.getDriftedResources(stackInfo.stackId);
+      log('Waiting for drift detection to complete...');
+      const detectionResult = await client.waitForDriftDetection(detectionId);
 
-    if (allDriftedResources.length === 0) {
-      if (spinner) spinner.succeed('No drifted resources found');
-      result.success = true;
-      return result;
-    }
-
-    // Filter to only importable resources
-    const modifiedResources: DriftedResource[] = [];
-    const deletedResources: DriftedResource[] = [];
-
-    for (const resource of allDriftedResources) {
-      if (!isResourceImportable(resource.resourceType)) {
-        result.skippedResources.push(resource.logicalResourceId);
-        continue;
+      if (detectionResult.status !== 'DETECTION_COMPLETE') {
+        result.errors.push(`Drift detection did not complete: ${detectionResult.status}`);
+        return result;
       }
-      if (resource.stackResourceDriftStatus === 'DELETED') {
-        deletedResources.push(resource);
-      } else {
-        modifiedResources.push(resource);
+
+      if (detectionResult.driftStatus === 'IN_SYNC') {
+        if (spinner) spinner.succeed('Stack is in sync - no drift detected');
+        result.success = true;
+        return result;
+      }
+
+      // Step 3: Get drifted resources and separate by type
+      log('Analyzing drifted resources...');
+      allDriftedResources = await client.getDriftedResources(stackInfo.stackId);
+
+      if (allDriftedResources.length === 0) {
+        if (spinner) spinner.succeed('No drifted resources found');
+        result.success = true;
+        return result;
+      }
+
+      // Filter to only importable resources
+      const modifiedResources: DriftedResource[] = [];
+      const deletedResources: DriftedResource[] = [];
+
+      for (const resource of allDriftedResources) {
+        if (!isResourceImportable(resource.resourceType)) {
+          result.skippedResources.push(resource.logicalResourceId);
+          continue;
+        }
+        if (resource.stackResourceDriftStatus === 'DELETED') {
+          deletedResources.push(resource);
+        } else {
+          modifiedResources.push(resource);
+        }
+      }
+
+      if (modifiedResources.length === 0 && deletedResources.length === 0) {
+        result.errors.push('All drifted resources are not eligible for import');
+        return result;
+      }
+
+      // Step 4: Interactive decisions
+      if (spinner) spinner.stop();
+
+      decisions = await promptForDecisions(
+        modifiedResources,
+        deletedResources,
+        options.yes ?? false,
+      );
+
+      if (spinner) spinner.start('Processing...');
+
+      // Export plan if requested (exit without executing)
+      if (options.exportPlan) {
+        const planMetadata = {
+          stackName: stackInfo.stackName,
+          region: client.region,
+          createdAt: new Date().toISOString(),
+          toolVersion: packageVersion(),
+          driftDetectionId: detectionId,
+        };
+        const plan = buildPlan(planMetadata, decisions);
+        const planPath = path.resolve(options.exportPlan);
+        fs.writeFileSync(planPath, serializePlan(plan));
+        if (spinner) spinner.succeed(`Plan exported to ${planPath}`);
+        result.success = true;
+        return result;
       }
     }
-
-    if (modifiedResources.length === 0 && deletedResources.length === 0) {
-      result.errors.push('All drifted resources are not eligible for import');
-      return result;
-    }
-
-    // Step 4: Interactive decisions
-    if (spinner) spinner.stop();
-
-    const decisions = await promptForDecisions(
-      modifiedResources,
-      deletedResources,
-      options.yes ?? false,
-    );
-
-    if (spinner) spinner.start('Processing...');
 
     // Record skipped resources
     for (const r of decisions.skip) {

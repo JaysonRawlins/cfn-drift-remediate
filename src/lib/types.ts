@@ -94,6 +94,10 @@ export interface RemediationOptions {
   yes?: boolean;
   /** Enable verbose output */
   verbose?: boolean;
+  /** File path to export the remediation plan to (exits without executing) */
+  exportPlan?: string;
+  /** File path to load and apply a previously exported remediation plan */
+  applyPlan?: string;
 }
 
 /**
@@ -168,4 +172,40 @@ export interface RecoveryCheckpoint {
   driftedResourceIds: string[];
   /** ISO timestamp when checkpoint was created */
   timestamp: string;
+}
+
+/**
+ * Metadata about when and where a remediation plan was created
+ */
+export interface PlanMetadata {
+  stackName: string;
+  region: string;
+  createdAt: string;
+  toolVersion: string;
+  driftDetectionId: string;
+}
+
+/**
+ * A single resource decision in a remediation plan (human-readable/editable)
+ */
+export interface PlanDecision {
+  logicalResourceId: string;
+  resourceType: string;
+  driftStatus: 'MODIFIED' | 'DELETED';
+  physicalResourceId: string;
+  action: 'autofix' | 'reimport' | 'remove' | 'skip';
+  /** Only present when action is 'reimport' */
+  reimportPhysicalId?: string;
+}
+
+/**
+ * Serializable remediation plan for export/import workflow
+ */
+export interface RemediationPlan {
+  version: 1;
+  metadata: PlanMetadata;
+  /** Human-readable/editable list of resource decisions */
+  decisions: PlanDecision[];
+  /** Internal resource data needed to execute the plan (do not edit) */
+  _resources: Record<string, DriftedResource>;
 }

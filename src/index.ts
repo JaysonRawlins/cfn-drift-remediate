@@ -22,13 +22,22 @@ program
   .option('--dry-run', 'Show what would be done without making changes', false)
   .option('-y, --yes', 'Skip interactive prompts, accept defaults', false)
   .option('-v, --verbose', 'Enable verbose output', false)
+  .option('--export-plan <file>', 'Export remediation plan to file without executing')
+  .option('--apply-plan <file>', 'Apply a previously exported remediation plan')
   .action(async (stackName: string, options: {
     region?: string;
     profile?: string;
     dryRun: boolean;
     yes: boolean;
     verbose: boolean;
+    exportPlan?: string;
+    applyPlan?: string;
   }) => {
+    if (options.exportPlan && options.applyPlan) {
+      console.error(chalk.red('Error: --export-plan and --apply-plan are mutually exclusive'));
+      process.exit(1);
+    }
+
     const spinner = ora('Starting drift remediation...').start();
 
     try {
@@ -40,12 +49,16 @@ program
           dryRun: options.dryRun,
           yes: options.yes,
           verbose: options.verbose,
+          exportPlan: options.exportPlan,
+          applyPlan: options.applyPlan,
         },
         spinner,
       );
 
       if (result.success) {
-        if (result.remediatedResources.length > 0 || result.removedResources.length > 0) {
+        if (options.exportPlan) {
+          // spinner.succeed already called in remediate() — nothing more to print
+        } else if (result.remediatedResources.length > 0 || result.removedResources.length > 0) {
           spinner.succeed(chalk.green('Drift remediation completed successfully!'));
           if (result.remediatedResources.length > 0) {
             console.log(chalk.cyan('\nRemediated resources:'));
@@ -99,3 +112,4 @@ export * from './lib/template-transformer';
 export * from './lib/resource-importer';
 export * from './lib/resource-identifier';
 export { promptForDecisions, formatDriftDiff } from './lib/interactive';
+export { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';
