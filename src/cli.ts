@@ -231,9 +231,15 @@ export async function remediate(
 
     // Analyze cascade removals (resources with broken Ref/GetAtt to removed resources)
     const cascadeRemovals = analyzeCascadeRemovals(originalTemplate, logicalIdsToRemove);
+
+    // Partition into permanent (depend on user-removed resources) vs temporary (depend on autofix/reimport)
+    const permanentlyRemovedIds = new Set(decisions.remove.map((r) => r.logicalResourceId));
+    const permanentCascade = cascadeRemovals.filter((c) => permanentlyRemovedIds.has(c.dependsOn));
+    const temporaryCascade = cascadeRemovals.filter((c) => !permanentlyRemovedIds.has(c.dependsOn));
+
     if (cascadeRemovals.length > 0) {
       if (spinner) spinner.stop();
-      displayCascadeWarning(cascadeRemovals);
+      displayCascadeWarning(permanentCascade, temporaryCascade);
       if (spinner) spinner.start('Processing...');
     }
 
@@ -253,9 +259,15 @@ export async function remediate(
           console.log(`  - ${r.logicalResourceId} (${r.resourceType})`);
         }
       }
-      if (cascadeRemovals.length > 0) {
-        console.log('\nResources cascade-removed (broken references):');
-        for (const c of cascadeRemovals) {
+      if (permanentCascade.length > 0) {
+        console.log('\nResources permanently cascade-removed (broken references):');
+        for (const c of permanentCascade) {
+          console.log(`  - ${c.logicalResourceId} (${c.resourceType}) -> depends on ${c.dependsOn}`);
+        }
+      }
+      if (temporaryCascade.length > 0) {
+        console.log('\nResources temporarily removed and recreated:');
+        for (const c of temporaryCascade) {
           console.log(`  - ${c.logicalResourceId} (${c.resourceType}) -> depends on ${c.dependsOn}`);
         }
       }
@@ -263,7 +275,7 @@ export async function remediate(
       result.remediatedResources = allImportable.map((r) => r.LogicalResourceId);
       result.removedResources = [
         ...decisions.remove.map((r) => r.logicalResourceId),
-        ...cascadeRemovals.map((c) => c.logicalResourceId),
+        ...permanentCascade.map((c) => c.logicalResourceId),
       ];
       return result;
     }
@@ -445,7 +457,7 @@ export async function remediate(
     result.remediatedResources = allImportable.map((r) => r.LogicalResourceId);
     result.removedResources = [
       ...decisions.remove.map((r) => r.logicalResourceId),
-      ...cascadeRemovals.map((c) => c.logicalResourceId),
+      ...permanentCascade.map((c) => c.logicalResourceId),
     ];
 
     if (options.verbose) {
