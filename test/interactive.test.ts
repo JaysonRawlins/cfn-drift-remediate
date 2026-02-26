@@ -22,7 +22,7 @@ jest.mock('@inquirer/prompts', () => ({
 }));
 
 import { select, input, confirm } from '@inquirer/prompts';
-import { formatDriftDiff, promptForDecisions } from '../src/lib/interactive';
+import { displayCascadeWarning, formatDriftDiff, promptForDecisions } from '../src/lib/interactive';
 import { DriftedResource, PropertyDifference } from '../src/lib/types';
 
 const mockSelect = select as jest.MockedFunction<typeof select>;
@@ -206,5 +206,27 @@ describe('promptForDecisions', () => {
     expect(decisions.reimport).toHaveLength(0);
     expect(decisions.remove).toHaveLength(0);
     expect(decisions.skip).toHaveLength(0);
+  });
+});
+
+describe('displayCascadeWarning', () => {
+  it('should not print anything when no cascade removals', () => {
+    displayCascadeWarning([]);
+    expect(console.log).not.toHaveBeenCalled();
+  });
+
+  it('should display cascade removal details', () => {
+    displayCascadeWarning([
+      {
+        logicalResourceId: 'SGIngress',
+        resourceType: 'AWS::EC2::SecurityGroupIngress',
+        dependsOn: 'DB',
+      },
+    ]);
+    expect(console.log).toHaveBeenCalled();
+    const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
+    expect(output).toContain('SGIngress');
+    expect(output).toContain('DB');
+    expect(output).toContain('1 additional resource(s)');
   });
 });

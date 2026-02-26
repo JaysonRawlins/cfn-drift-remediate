@@ -5,6 +5,7 @@ import {
   prepareTemplateForImport,
   parseTemplate,
   stringifyTemplate,
+  analyzeCascadeRemovals,
 } from '../src/lib/template-transformer';
 import { CloudFormationTemplate } from '../src/lib/types';
 
@@ -417,5 +418,90 @@ Resources:
     const parsed = JSON.parse(json);
 
     expect(parsed.Resources.Bucket.Type).toBe('AWS::S3::Bucket');
+  });
+});
+
+describe('analyzeCascadeRemovals', () => {
+  it('should return empty array when no cascades', () => {
+    const template: CloudFormationTemplate = {
+      Resources: {
+        Bucket: { Type: 'AWS::S3::Bucket', Properties: {} },
+        Queue: { Type: 'AWS::SQS::Queue', Properties: { QueueName: 'my-queue' } },
+      },
+    };
+    const result = analyzeCascadeRemovals(template, new Set(['Bucket']));
+    expect(result).toEqual([]);
+  });
+
+  it('should detect cascade from Ref dependency', () => {
+    const template: CloudFormationTemplate = {
+      Resources: {
+        DB: { Type: 'AWS::RDS::DBInstance', Properties: {} },
+        Secret: {
+          Type: 'AWS::SecretsManager::SecretTargetAttachment',
+          Properties: { TargetId: { Ref: 'DB' } },
+        },
+      },
+    };
+    const result = analyzeCascadeRemovals(template, new Set(['DB']));
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({
+      logicalResourceId: 'Secret',
+      resourceType: 'AWS::SecretsManager::SecretTargetAttachment',
+      dependsOn: 'DB',
+    });
+  });
+
+  it('should detect cascade from GetAtt dependency', () => {
+    const template: CloudFormationTemplate = {
+      Resources: {
+        DB: { Type: 'AWS::RDS::DBInstance', Properties: {} },
+        SGIngress: {
+          Type: 'AWS::EC2::SecurityGroupIngress',
+          Properties: { FromPort: { 'Fn::GetAtt': ['DB', 'Endpoint.Port'] } },
+        },
+      },
+    };
+    const result = analyzeCascadeRemovals(template, new Set(['DB']));
+    expect(result).toHaveLength(1);
+    expect(result[0].logicalResourceId).toBe('SGIngress');
+    expect(result[0].dependsOn).toBe('DB');
+  });
+
+  it('should detect multi-level cascades', () => {
+    const template: CloudFormationTemplate = {
+      Resources: {
+        A: { Type: 'AWS::S3::Bucket', Properties: {} },
+        B: { Type: 'AWS::SQS::Queue', Properties: { QueueName: { Ref: 'A' } } },
+        C: { Type: 'AWS::SNS::Topic', Properties: { TopicName: { Ref: 'B' } } },
+      },
+    };
+    const result = analyzeCascadeRemovals(template, new Set(['A']));
+    expect(result).toHaveLength(2);
+    const ids = result.map((r) => r.logicalResourceId);
+    expect(ids).toContain('B');
+    expect(ids).toContain('C');
+  });
+
+  it('should not cascade for DependsOn-only references', () => {
+    const template: CloudFormationTemplate = {
+      Resources: {
+        Bucket: { Type: 'AWS::S3::Bucket', Properties: {} },
+        Queue: { Type: 'AWS::SQS::Queue', Properties: {}, DependsOn: 'Bucket' },
+      },
+    };
+    const result = analyzeCascadeRemovals(template, new Set(['Bucket']));
+    expect(result).toEqual([]);
+  });
+
+  it('should not include resources already in the removal set', () => {
+    const template: CloudFormationTemplate = {
+      Resources: {
+        A: { Type: 'AWS::S3::Bucket', Properties: {} },
+        B: { Type: 'AWS::SQS::Queue', Properties: { QueueName: { Ref: 'A' } } },
+      },
+    };
+    const result = analyzeCascadeRemovals(template, new Set(['A', 'B']));
+    expect(result).toEqual([]);
   });
 });

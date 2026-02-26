@@ -111,5 +111,5 @@ export * from './lib/eligible-resources';
 export * from './lib/template-transformer';
 export * from './lib/resource-importer';
 export * from './lib/resource-identifier';
-export { promptForDecisions, formatDriftDiff } from './lib/interactive';
+export { promptForDecisions, formatDriftDiff, displayCascadeWarning } from './lib/interactive';
 export { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';

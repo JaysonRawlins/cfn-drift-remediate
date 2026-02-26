@@ -1,5 +1,5 @@
 import * as yaml from 'yaml-cfn';
-import { CloudFormationTemplate, TransformResult } from './types';
+import { CascadeRemoval, CloudFormationTemplate, TransformResult } from './types';
 import { deepClone } from './utils';
 
 /**
@@ -306,7 +306,7 @@ export function setRetentionOnAllResources(template: CloudFormationTemplate): Cl
  * Check if a value contains unresolved Ref/GetAtt/Fn::Sub references to specified logical IDs.
  * Used to detect broken references after resource removal.
  */
-function hasUnresolvedReferences(
+export function hasUnresolvedReferences(
   value: unknown,
   removedLogicalIds: Set<string>,
 ): boolean {
@@ -473,6 +473,42 @@ export function transformTemplateForRemoval(
     removedResources,
     resolvedReferences: resolvedValues,
   };
+}
+
+/**
+ * Analyze which resources would be cascade-removed if the given logical IDs
+ * are removed from the template. Does NOT modify the template.
+ */
+export function analyzeCascadeRemovals(
+  template: CloudFormationTemplate,
+  logicalIdsToRemove: Set<string>,
+): CascadeRemoval[] {
+  const cascadeRemovals: CascadeRemoval[] = [];
+  const allRemovedIds = new Set(logicalIdsToRemove);
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [logicalId, resource] of Object.entries(template.Resources || {})) {
+      if (allRemovedIds.has(logicalId)) continue;
+      if (!resource.Properties) continue;
+
+      for (const removedId of allRemovedIds) {
+        if (hasUnresolvedReferences(resource.Properties, new Set([removedId]))) {
+          cascadeRemovals.push({
+            logicalResourceId: logicalId,
+            resourceType: resource.Type,
+            dependsOn: removedId,
+          });
+          allRemovedIds.add(logicalId);
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return cascadeRemovals;
 }
 
 /**

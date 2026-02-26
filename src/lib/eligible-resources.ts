@@ -199,6 +199,9 @@ export const ELIGIBLE_IMPORT_RESOURCES: Record<string, {
   'AWS::ElasticLoadBalancingV2::LoadBalancer': {
     importProperties: ['LoadBalancerArn'],
   },
+  'AWS::ElasticLoadBalancingV2::TargetGroup': {
+    importProperties: ['TargetGroupArn'],
+  },
   'AWS::EventSchemas::RegistryPolicy': {
     importProperties: ['Id'],
   },

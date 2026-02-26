@@ -3,7 +3,7 @@ import * as path from 'path';
 import { Ora } from 'ora';
 import { CfnClientWrapper } from './lib/cfn-client';
 import { isResourceImportable, getAllRequiredCapabilities } from './lib/eligible-resources';
-import { promptForDecisions } from './lib/interactive';
+import { displayCascadeWarning, promptForDecisions } from './lib/interactive';
 import { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';
 import { buildResourcesToImport, buildReimportDescriptor } from './lib/resource-importer';
 import {
@@ -14,6 +14,7 @@ import {
   parseResolvedOutputs,
   setRetentionOnAllResources,
   transformTemplateForRemoval,
+  analyzeCascadeRemovals,
 } from './lib/template-transformer';
 import {
   RemediationOptions,
@@ -228,6 +229,14 @@ export async function remediate(
       ...decisions.remove.map((r) => r.logicalResourceId),
     ]);
 
+    // Analyze cascade removals (resources with broken Ref/GetAtt to removed resources)
+    const cascadeRemovals = analyzeCascadeRemovals(originalTemplate, logicalIdsToRemove);
+    if (cascadeRemovals.length > 0) {
+      if (spinner) spinner.stop();
+      displayCascadeWarning(cascadeRemovals);
+      if (spinner) spinner.start('Processing...');
+    }
+
     // Dry run - show what would be done
     if (options.dryRun) {
       if (spinner) spinner.info('Dry run - planned actions:');
@@ -244,9 +253,18 @@ export async function remediate(
           console.log(`  - ${r.logicalResourceId} (${r.resourceType})`);
         }
       }
+      if (cascadeRemovals.length > 0) {
+        console.log('\nResources cascade-removed (broken references):');
+        for (const c of cascadeRemovals) {
+          console.log(`  - ${c.logicalResourceId} (${c.resourceType}) -> depends on ${c.dependsOn}`);
+        }
+      }
       result.success = true;
       result.remediatedResources = allImportable.map((r) => r.LogicalResourceId);
-      result.removedResources = decisions.remove.map((r) => r.logicalResourceId);
+      result.removedResources = [
+        ...decisions.remove.map((r) => r.logicalResourceId),
+        ...cascadeRemovals.map((c) => c.logicalResourceId),
+      ];
       return result;
     }
 
@@ -425,7 +443,10 @@ export async function remediate(
 
     result.success = true;
     result.remediatedResources = allImportable.map((r) => r.LogicalResourceId);
-    result.removedResources = decisions.remove.map((r) => r.logicalResourceId);
+    result.removedResources = [
+      ...decisions.remove.map((r) => r.logicalResourceId),
+      ...cascadeRemovals.map((c) => c.logicalResourceId),
+    ];
 
     if (options.verbose) {
       console.log(`Remediation complete. Recovery checkpoint can be removed: ${backupPath}`);

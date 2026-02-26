@@ -243,6 +243,15 @@ describe('buildIdentifierFromPhysicalId', () => {
       expect(result).toEqual({ LoadBalancerArn: arn });
     });
 
+    it('should use full ARN for TargetGroup', () => {
+      const arn = 'arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/my-tg/abc123';
+      const result = buildIdentifierFromPhysicalId(
+        'AWS::ElasticLoadBalancingV2::TargetGroup',
+        arn,
+      );
+      expect(result).toEqual({ TargetGroupArn: arn });
+    });
+
     it('should use full ARN for StepFunctions StateMachine', () => {
       const arn = 'arn:aws:states:us-east-1:123:stateMachine:my-sm';
       const result = buildIdentifierFromPhysicalId('AWS::StepFunctions::StateMachine', arn);

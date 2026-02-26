@@ -1,6 +1,7 @@
 import { select, input, confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import {
+  CascadeRemoval,
   DriftedResource,
   InteractiveDecisions,
   ResourceAction,
@@ -150,6 +151,29 @@ export async function confirmActions(decisions: InteractiveDecisions): Promise<b
     message: `Proceed with ${actionCount} action(s)?`,
     default: true,
   });
+}
+
+/**
+ * Display a warning about resources that will be cascade-removed
+ * because they reference resources being removed.
+ */
+export function displayCascadeWarning(cascadeRemovals: CascadeRemoval[]): void {
+  if (cascadeRemovals.length === 0) return;
+
+  console.log(chalk.bold.yellow(
+    `\nWarning: ${cascadeRemovals.length} additional resource(s) will be removed from the stack due to broken references:`,
+  ));
+
+  for (const removal of cascadeRemovals) {
+    console.log(chalk.yellow(
+      `  - ${removal.logicalResourceId} (${removal.resourceType})` +
+      chalk.dim(` references removed resource ${removal.dependsOn}`),
+    ));
+  }
+
+  console.log(chalk.dim(
+    '\nThese resources have Ref/GetAtt references to resources being removed and cannot remain in the stack.\n',
+  ));
 }
 
 /**

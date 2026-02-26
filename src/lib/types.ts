@@ -175,6 +175,19 @@ export interface RecoveryCheckpoint {
 }
 
 /**
+ * Describes a resource that will be cascade-removed because it has
+ * unresolvable references to a removed resource.
+ */
+export interface CascadeRemoval {
+  /** Logical ID of the resource that will be cascade-removed */
+  logicalResourceId: string;
+  /** AWS resource type of the cascade-removed resource */
+  resourceType: string;
+  /** Logical ID of the removed resource that this one depends on */
+  dependsOn: string;
+}
+
+/**
  * Metadata about when and where a remediation plan was created
  */
 export interface PlanMetadata {
