@@ -1,8 +1,8 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
-import * as rds from 'aws-cdk-lib/aws-rds';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as elbv2_targets from 'aws-cdk-lib/aws-elasticloadbalancingv2-targets';
+import * as rds from 'aws-cdk-lib/aws-rds';
 import { Construct } from 'constructs';
 
 export class DriftTestStack extends cdk.Stack {

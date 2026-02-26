@@ -55,7 +55,7 @@ bash scripts/break-stack.sh
 
 Note the replacement DB identifier printed at the end (`drift-test-replacement-db`).
 
-### 5. Run drift remediation (interactive)
+### 5a. Run drift remediation (interactive)
 
 ```bash
 bash scripts/run-remediation.sh
@@ -64,6 +64,22 @@ bash scripts/run-remediation.sh
 When prompted:
 - **MODIFIED EC2 instance** → choose **Autofix**
 - **DELETED RDS DB instance** → choose **Re-import**, enter: `drift-test-replacement-db`
+
+### 5b. Alternative: Plan workflow
+
+Export decisions to a file, review, then apply:
+
+```bash
+# Export plan (runs drift detection + prompts, but doesn't execute)
+npx ts-node ../../src/index.ts CfnDriftTestStack \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --export-plan plan.json
+
+# Review/edit plan.json, then apply
+npx ts-node ../../src/index.ts CfnDriftTestStack \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --apply-plan plan.json
+```
 
 ### 6. Verify
 
@@ -94,3 +110,4 @@ bash scripts/cleanup.sh
 5. **CDK connections pattern**: SecurityGroupIngress/Egress rules survive DB deletion (SG intact)
 6. **Interactive UX**: Per-resource prompts, colored diffs, confirmation flow
 7. **Template restore**: Original template restored after import
+8. **Plan workflow**: Export/apply plan files for auditable, repeatable remediation
