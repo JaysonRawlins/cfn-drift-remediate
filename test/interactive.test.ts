@@ -241,7 +241,7 @@ describe('displayCascadeWarning', () => {
     expect(console.log).toHaveBeenCalled();
     const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
     expect(output).toContain('TargetGroup');
-    expect(output).toContain('temporarily removed and recreated');
+    expect(output).toContain('temporarily removed from the stack');
   });
 
   it('should display both permanent and temporary removals', () => {
@@ -259,7 +259,7 @@ describe('displayCascadeWarning', () => {
     );
     const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
     expect(output).toContain('permanently removed');
-    expect(output).toContain('temporarily removed and recreated');
+    expect(output).toContain('temporarily removed from the stack');
     expect(output).toContain('SGIngress');
     expect(output).toContain('LambdaPerm');
   });

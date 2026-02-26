@@ -186,7 +186,7 @@ export function displayCascadeWarning(
 
   if (temporaryRemovals.length > 0) {
     console.log(chalk.bold.cyan(
-      `\nNote: ${temporaryRemovals.length} dependent resource(s) will be temporarily removed and recreated during remediation:`,
+      `\nNote: ${temporaryRemovals.length} dependent resource(s) will be temporarily removed from the stack during remediation:`,
     ));
     for (const removal of temporaryRemovals) {
       console.log(chalk.cyan(
@@ -195,7 +195,7 @@ export function displayCascadeWarning(
       ));
     }
     console.log(chalk.dim(
-      '\nThese resources reference resources being reimported and will be automatically restored when the original template is applied.\n',
+      '\nThese resources reference resources being reimported and will be restored when the original template is applied.\n',
     ));
   }
 }
