@@ -45,6 +45,7 @@ const project = new typescript.TypeScriptProject({
     'yaml-cfn',
     'chalk',
     'ora',
+    '@inquirer/prompts',
   ],
 
   // Dev Dependencies
@@ -89,5 +90,12 @@ new TextFile(project, '.tool-versions', {
     'yarn 1.22.22',
   ],
 });
+
+// Exclude integration test CDK app from ESLint (has its own dependencies)
+project.eslint?.addIgnorePattern('test/integration/');
+
+// Ignore runtime backup files created by cfn-drift-remediate
+project.gitignore.addPatterns('.cfn-drift-remediate-backup-*');
+project.npmignore?.addPatterns('.cfn-drift-remediate-backup-*');
 
 project.synth();

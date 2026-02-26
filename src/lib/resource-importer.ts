@@ -1,4 +1,5 @@
 import { isResourceImportable, getImportProperties } from './eligible-resources';
+import { buildIdentifierFromPhysicalId } from './resource-identifier';
 import { DriftedResource, ResourceToImport } from './types';
 
 export interface BuildImportResult {
@@ -206,6 +207,39 @@ function fillSpecialCases(
       // No special handling needed
       break;
   }
+}
+
+/**
+ * Build a ResourceToImport from a user-provided physical ID for a DELETED resource.
+ * Uses resource-identifier.ts for ARN parsing and identifier extraction.
+ *
+ * For deleted resources being re-imported, the original template properties are used
+ * (since we cannot describe the actual state of a resource that was deleted from the stack).
+ *
+ * @param resource - The deleted DriftedResource
+ * @param userProvidedPhysicalId - ARN, name, or ID entered by the user
+ * @param dynamicIdentifiers - Optional identifier properties from GetTemplateSummary
+ * @returns ResourceToImport or null if identifier cannot be determined
+ */
+export function buildReimportDescriptor(
+  resource: DriftedResource,
+  userProvidedPhysicalId: string,
+  dynamicIdentifiers?: Map<string, string[]>,
+): ResourceToImport | null {
+  const identifier = buildIdentifierFromPhysicalId(resource.resourceType, userProvidedPhysicalId);
+  if (!identifier) return null;
+
+  // Validate all required properties are present
+  const requiredProps = dynamicIdentifiers?.get(resource.resourceType)
+    || getImportProperties(resource.resourceType);
+  const allPresent = requiredProps.every((prop) => prop in identifier);
+  if (!allPresent) return null;
+
+  return {
+    ResourceType: resource.resourceType,
+    LogicalResourceId: resource.logicalResourceId,
+    ResourceIdentifier: identifier,
+  };
 }
 
 /**

@@ -55,6 +55,30 @@ export interface ResourceToImport {
 }
 
 /**
+ * Action the user chose for a single drifted resource
+ */
+export type ResourceAction =
+  | { kind: 'autofix' }
+  | { kind: 'skip' }
+  | { kind: 'remove' }
+  | { kind: 'reimport'; physicalId: string };
+
+/**
+ * Structured result of the interactive prompting phase.
+ * Partitions user decisions into groups for the orchestrator.
+ */
+export interface InteractiveDecisions {
+  /** MODIFIED resources to autofix (remove + reimport with actual state) */
+  autofix: DriftedResource[];
+  /** DELETED resources to reimport with user-provided physical IDs */
+  reimport: Array<{ resource: DriftedResource; physicalId: string }>;
+  /** Resources to permanently remove from stack (retain in AWS) */
+  remove: DriftedResource[];
+  /** Resources the user chose to skip entirely */
+  skip: DriftedResource[];
+}
+
+/**
  * Options for the remediation process
  */
 export interface RemediationOptions {
@@ -66,8 +90,14 @@ export interface RemediationOptions {
   profile?: string;
   /** If true, only show what would be done without making changes */
   dryRun?: boolean;
+  /** Skip interactive prompts; accept default action for every resource */
+  yes?: boolean;
   /** Enable verbose output */
   verbose?: boolean;
+  /** File path to export the remediation plan to (exits without executing) */
+  exportPlan?: string;
+  /** File path to load and apply a previously exported remediation plan */
+  applyPlan?: string;
 }
 
 /**
@@ -76,10 +106,12 @@ export interface RemediationOptions {
 export interface RemediationResult {
   /** Whether remediation was successful */
   success: boolean;
-  /** List of resource logical IDs that were remediated */
+  /** List of resource logical IDs that were remediated (autofix + reimport) */
   remediatedResources: string[];
-  /** List of resource logical IDs that were skipped (not importable) */
+  /** List of resource logical IDs that were skipped */
   skippedResources: string[];
+  /** List of resource logical IDs permanently removed from the stack */
+  removedResources: string[];
   /** Error messages if any */
   errors: string[];
 }
@@ -140,4 +172,40 @@ export interface RecoveryCheckpoint {
   driftedResourceIds: string[];
   /** ISO timestamp when checkpoint was created */
   timestamp: string;
+}
+
+/**
+ * Metadata about when and where a remediation plan was created
+ */
+export interface PlanMetadata {
+  stackName: string;
+  region: string;
+  createdAt: string;
+  toolVersion: string;
+  driftDetectionId: string;
+}
+
+/**
+ * A single resource decision in a remediation plan (human-readable/editable)
+ */
+export interface PlanDecision {
+  logicalResourceId: string;
+  resourceType: string;
+  driftStatus: 'MODIFIED' | 'DELETED';
+  physicalResourceId: string;
+  action: 'autofix' | 'reimport' | 'remove' | 'skip';
+  /** Only present when action is 'reimport' */
+  reimportPhysicalId?: string;
+}
+
+/**
+ * Serializable remediation plan for export/import workflow
+ */
+export interface RemediationPlan {
+  version: 1;
+  metadata: PlanMetadata;
+  /** Human-readable/editable list of resource decisions */
+  decisions: PlanDecision[];
+  /** Internal resource data needed to execute the plan (do not edit) */
+  _resources: Record<string, DriftedResource>;
 }

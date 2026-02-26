@@ -84,6 +84,10 @@
       "type": "runtime"
     },
     {
+      "name": "@inquirer/prompts",
+      "type": "runtime"
+    },
+    {
       "name": "chalk",
       "type": "runtime"
     },

@@ -407,16 +407,35 @@ export function transformTemplateForRemoval(
     }
   }
 
-  // Step 3b: Clean up DependsOn references to removed resources
+  // Step 3b: Remove resources that still have unresolved references to removed resources
+  // This cascades: removing a resource may cause other resources to have broken references.
+  const allRemovedIds = new Set(driftedLogicalIds);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [logicalId, resource] of Object.entries(transformedTemplate.Resources || {})) {
+      if (allRemovedIds.has(logicalId)) continue;
+      const hasBrokenRefs = resource.Properties &&
+        hasUnresolvedReferences(resource.Properties, allRemovedIds);
+      if (hasBrokenRefs) {
+        delete transformedTemplate.Resources[logicalId];
+        removedResources.push(logicalId);
+        allRemovedIds.add(logicalId);
+        changed = true;
+      }
+    }
+  }
+
+  // Step 3d: Clean up DependsOn references to all removed resources (including cascaded)
   for (const resource of Object.values(transformedTemplate.Resources || {})) {
     if (resource.DependsOn) {
       if (typeof resource.DependsOn === 'string') {
-        if (driftedLogicalIds.has(resource.DependsOn)) {
+        if (allRemovedIds.has(resource.DependsOn)) {
           delete resource.DependsOn;
         }
       } else if (Array.isArray(resource.DependsOn)) {
         resource.DependsOn = resource.DependsOn.filter(
-          (dep) => !driftedLogicalIds.has(dep),
+          (dep) => !allRemovedIds.has(dep),
         );
         if (resource.DependsOn.length === 0) {
           delete resource.DependsOn;
@@ -425,12 +444,12 @@ export function transformTemplateForRemoval(
     }
   }
 
-  // Step 3c: Remove Outputs that still reference removed resources
+  // Step 3e: Remove Outputs that still reference removed resources
   if (transformedTemplate.Outputs) {
     const outputsToRemove: string[] = [];
 
     for (const [outputName, outputDef] of Object.entries(transformedTemplate.Outputs)) {
-      if (hasUnresolvedReferences(outputDef, driftedLogicalIds)) {
+      if (hasUnresolvedReferences(outputDef, allRemovedIds)) {
         outputsToRemove.push(outputName);
       }
     }
