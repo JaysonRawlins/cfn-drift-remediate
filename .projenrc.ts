@@ -45,6 +45,7 @@ const project = new typescript.TypeScriptProject({
     'yaml-cfn',
     'chalk',
     'ora',
+    '@inquirer/prompts',
   ],
 
   // Dev Dependencies

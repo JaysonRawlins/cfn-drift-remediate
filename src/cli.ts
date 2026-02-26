@@ -3,7 +3,8 @@ import * as path from 'path';
 import { Ora } from 'ora';
 import { CfnClientWrapper } from './lib/cfn-client';
 import { isResourceImportable, getAllRequiredCapabilities } from './lib/eligible-resources';
-import { buildResourcesToImport } from './lib/resource-importer';
+import { promptForDecisions } from './lib/interactive';
+import { buildResourcesToImport, buildReimportDescriptor } from './lib/resource-importer';
 import {
   parseTemplate,
   stringifyTemplate,
@@ -12,9 +13,15 @@ import {
   parseResolvedOutputs,
   setRetentionOnAllResources,
   transformTemplateForRemoval,
-  prepareTemplateForImport,
 } from './lib/template-transformer';
-import { RemediationOptions, RemediationResult, RecoveryCheckpoint, DriftedResource } from './lib/types';
+import {
+  RemediationOptions,
+  RemediationResult,
+  RecoveryCheckpoint,
+  DriftedResource,
+  ResourceToImport,
+} from './lib/types';
+import { deepClone } from './lib/utils';
 
 const DEFAULT_CAPABILITIES = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'];
 
@@ -34,6 +41,7 @@ export async function remediate(
     success: false,
     remediatedResources: [],
     skippedResources: [],
+    removedResources: [],
     errors: [],
   };
 
@@ -76,7 +84,7 @@ export async function remediate(
       return result;
     }
 
-    // Step 3: Get drifted resources
+    // Step 3: Get drifted resources and separate by type
     log('Analyzing drifted resources...');
     const allDriftedResources = await client.getDriftedResources(stackInfo.stackId);
 
@@ -87,99 +95,119 @@ export async function remediate(
     }
 
     // Filter to only importable resources
-    const importableResources: DriftedResource[] = [];
-    for (const resource of allDriftedResources) {
-      if (isResourceImportable(resource.resourceType)) {
-        importableResources.push(resource);
-      } else {
-        result.skippedResources.push(resource.logicalResourceId);
-      }
-    }
-
-    // Separate MODIFIED from DELETED resources
-    // DELETED resources cannot be re-imported (physical resource no longer exists)
     const modifiedResources: DriftedResource[] = [];
     const deletedResources: DriftedResource[] = [];
 
-    for (const resource of importableResources) {
+    for (const resource of allDriftedResources) {
+      if (!isResourceImportable(resource.resourceType)) {
+        result.skippedResources.push(resource.logicalResourceId);
+        continue;
+      }
       if (resource.stackResourceDriftStatus === 'DELETED') {
         deletedResources.push(resource);
-        result.skippedResources.push(resource.logicalResourceId);
       } else {
         modifiedResources.push(resource);
       }
     }
 
-    if (deletedResources.length > 0) {
-      log(`Skipping ${deletedResources.length} DELETED resources (no longer exist in AWS)`);
-      if (options.verbose) {
-        for (const r of deletedResources) {
-          console.warn(`  DELETED: ${r.logicalResourceId} (${r.resourceType})`);
-        }
-      }
-    }
-
-    if (modifiedResources.length === 0) {
-      if (deletedResources.length > 0) {
-        result.errors.push('All drifted resources are either deleted or not eligible for import');
-      } else {
-        result.errors.push('All drifted resources are not eligible for import');
-      }
-      if (result.skippedResources.length > 0) {
-        result.errors.push(`Skipped resources: ${result.skippedResources.join(', ')}`);
-      }
+    if (modifiedResources.length === 0 && deletedResources.length === 0) {
+      result.errors.push('All drifted resources are not eligible for import');
       return result;
     }
 
-    if (options.verbose) {
-      console.log(`Found ${modifiedResources.length} drifted resources eligible for remediation:`);
-      for (const r of modifiedResources) {
-        console.log(`  - ${r.logicalResourceId} (${r.resourceType}): ${r.stackResourceDriftStatus}`);
-      }
-      if (result.skippedResources.length > 0) {
-        console.log(`Skipped ${result.skippedResources.length} non-importable/deleted resources`);
-      }
+    // Step 4: Interactive decisions
+    if (spinner) spinner.stop();
+
+    const decisions = await promptForDecisions(
+      modifiedResources,
+      deletedResources,
+      options.yes ?? false,
+    );
+
+    if (spinner) spinner.start('Processing...');
+
+    // Record skipped resources
+    for (const r of decisions.skip) {
+      result.skippedResources.push(r.logicalResourceId);
     }
 
-    // Step 4: Build resources to import
-    const resourceIdentifiers = await client.getResourceIdentifiers(originalTemplateBody);
-    const { importable, skipped } = buildResourcesToImport(modifiedResources, resourceIdentifiers);
+    // If everything was skipped or cancelled, we're done
+    if (decisions.autofix.length === 0 && decisions.reimport.length === 0 && decisions.remove.length === 0) {
+      if (spinner) spinner.succeed('No actions selected');
+      result.success = true;
+      return result;
+    }
 
-    for (const s of skipped) {
+    // Step 5: Build resources to import from decisions
+    const resourceIdentifiers = await client.getResourceIdentifiers(originalTemplateBody);
+
+    // Autofix resources: use existing buildResourcesToImport
+    const { importable: autofixImportable, skipped: autofixSkipped } =
+      buildResourcesToImport(decisions.autofix, resourceIdentifiers);
+
+    for (const s of autofixSkipped) {
       if (!result.skippedResources.includes(s.logicalResourceId)) {
         result.skippedResources.push(s.logicalResourceId);
       }
     }
 
-    if (importable.length === 0) {
-      result.errors.push('Could not determine import identifiers for any drifted resources');
+    // Reimport resources: build from user-provided physical IDs
+    const reimportImportable: ResourceToImport[] = [];
+    for (const { resource, physicalId } of decisions.reimport) {
+      const descriptor = buildReimportDescriptor(resource, physicalId, resourceIdentifiers);
+      if (descriptor) {
+        reimportImportable.push(descriptor);
+      } else {
+        result.errors.push(
+          `Could not determine import identifier for ${resource.logicalResourceId} from "${physicalId}"`,
+        );
+        result.skippedResources.push(resource.logicalResourceId);
+      }
+    }
+
+    // Combined importable list
+    const allImportable = [...autofixImportable, ...reimportImportable];
+
+    // If nothing to import AND nothing to remove, we're stuck
+    if (allImportable.length === 0 && decisions.remove.length === 0) {
+      result.errors.push('Could not determine import identifiers for any selected resources');
       return result;
     }
 
-    // Dry run - just show what would be done
+    // Build the set of logical IDs that need removal from the template
+    // This includes everything being acted on (autofix, reimport, remove)
+    const logicalIdsToRemove = new Set([
+      ...autofixImportable.map((r) => r.LogicalResourceId),
+      ...reimportImportable.map((r) => r.LogicalResourceId),
+      ...decisions.remove.map((r) => r.logicalResourceId),
+    ]);
+
+    // Dry run - show what would be done
     if (options.dryRun) {
-      if (spinner) spinner.info('Dry run - would remediate the following resources:');
-      console.log('\nResources to remediate:');
-      for (const resource of importable) {
-        console.log(`  - ${resource.LogicalResourceId} (${resource.ResourceType})`);
-        console.log(`    Identifier: ${JSON.stringify(resource.ResourceIdentifier)}`);
+      if (spinner) spinner.info('Dry run - planned actions:');
+      if (allImportable.length > 0) {
+        console.log('\nResources to remediate:');
+        for (const resource of allImportable) {
+          console.log(`  - ${resource.LogicalResourceId} (${resource.ResourceType})`);
+          console.log(`    Identifier: ${JSON.stringify(resource.ResourceIdentifier)}`);
+        }
+      }
+      if (decisions.remove.length > 0) {
+        console.log('\nResources to remove from stack:');
+        for (const r of decisions.remove) {
+          console.log(`  - ${r.logicalResourceId} (${r.resourceType})`);
+        }
       }
       result.success = true;
-      result.remediatedResources = importable.map((r) => r.LogicalResourceId);
+      result.remediatedResources = allImportable.map((r) => r.LogicalResourceId);
+      result.removedResources = decisions.remove.map((r) => r.logicalResourceId);
       return result;
     }
 
     // Determine required capabilities
-    const resourceTypes = importable.map((r) => r.ResourceType);
+    const resourceTypes = allImportable.map((r) => r.ResourceType);
     const additionalCaps = getAllRequiredCapabilities(resourceTypes);
     const capabilities = [...new Set([...DEFAULT_CAPABILITIES, ...additionalCaps])];
-
-    // Build set of drifted logical IDs (includes both MODIFIED and DELETED
-    // since both need removal from template and reference resolution)
-    const driftedLogicalIds = new Set([
-      ...modifiedResources.map((r) => r.logicalResourceId),
-      ...deletedResources.map((r) => r.logicalResourceId),
-    ]);
 
     // Save recovery checkpoint before any stack mutations
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -190,7 +218,7 @@ export async function remediate(
       stackId: stackInfo.stackId,
       originalTemplateBody,
       parameters: stackInfo.parameters,
-      driftedResourceIds: Array.from(driftedLogicalIds),
+      driftedResourceIds: Array.from(logicalIdsToRemove),
       timestamp: new Date().toISOString(),
     };
     fs.writeFileSync(backupPath, JSON.stringify(checkpoint, null, 2));
@@ -199,46 +227,66 @@ export async function remediate(
       console.log(`Recovery checkpoint: ${backupPath}`);
     }
 
-    // Step 5: Set DeletionPolicy: Retain on all resources
+    // Step 6: Set DeletionPolicy: Retain on all resources
+    // DELETED resources must be removed from the template first — CloudFormation
+    // cannot update metadata on resources that no longer exist in AWS.
     log('Setting DeletionPolicy: Retain on all resources...');
-    const retainTemplate = setRetentionOnAllResources(originalTemplate);
+    const deletedLogicalIds = new Set(
+      allDriftedResources
+        .filter((r) => r.stackResourceDriftStatus === 'DELETED' && logicalIdsToRemove.has(r.logicalResourceId))
+        .map((r) => r.logicalResourceId),
+    );
+
+    let retainTemplate = setRetentionOnAllResources(originalTemplate);
+
+    if (deletedLogicalIds.size > 0) {
+      // Remove deleted resources and clean up their dangling references
+      const { template: cleanedTemplate } = transformTemplateForRemoval(
+        retainTemplate,
+        deletedLogicalIds,
+        new Map(), // no resolved values — just strip unresolvable references
+      );
+      retainTemplate = cleanedTemplate;
+    }
+
     await client.updateStack(
       stackInfo.stackId,
       stringifyTemplate(retainTemplate),
-      stackInfo.parameters,
+      retainTemplate.Parameters ? stackInfo.parameters : undefined,
       capabilities,
     );
 
-    // Step 6: De-reference Ref/GetAtt pointing to drifted resources (if needed)
-    const references = collectReferences(retainTemplate, driftedLogicalIds);
+    // Step 7: Resolve cross-references to MODIFIED resources being removed
+    // (DELETED resources are already removed from the template, so only MODIFIED refs remain)
+    const modifiedIdsToRemove = new Set(
+      [...logicalIdsToRemove].filter((id) => !deletedLogicalIds.has(id)),
+    );
+    const references = collectReferences(retainTemplate, modifiedIdsToRemove);
 
     let resolvedValues = new Map<string, unknown>();
     if (references.size > 0) {
       log('Resolving references to drifted resources...');
 
-      // Add temporary outputs to resolve references
       const outputTemplate = addResolutionOutputs(retainTemplate, references);
       await client.updateStack(
         stackInfo.stackId,
         stringifyTemplate(outputTemplate),
-        stackInfo.parameters,
+        outputTemplate.Parameters ? stackInfo.parameters : undefined,
         capabilities,
       );
 
-      // Get resolved output values
       const updatedStackInfo = await client.getStackInfo(stackInfo.stackId);
       resolvedValues = parseResolvedOutputs(updatedStackInfo.outputs || [], references);
     }
 
-    // Step 7: Remove drifted resources from template
-    log('Removing drifted resources from stack (resources retained)...');
+    // Step 8: Remove remaining (MODIFIED) resources from template
+    log('Removing resources from stack (resources retained in AWS)...');
     const { template: removalTemplate } = transformTemplateForRemoval(
       retainTemplate,
-      driftedLogicalIds,
+      modifiedIdsToRemove,
       resolvedValues,
     );
 
-    // Only pass parameters if the template defines them
     const removalParams = removalTemplate.Parameters ? stackInfo.parameters : undefined;
     await client.updateStack(
       stackInfo.stackId,
@@ -247,38 +295,91 @@ export async function remediate(
       capabilities,
     );
 
-    // Step 8: Create import template with actual properties
-    log('Preparing import template with actual resource state...');
-    const importTemplate = prepareTemplateForImport(originalTemplate, modifiedResources);
+    // Step 9: Import resources (only if there are resources to import)
+    if (allImportable.length > 0) {
+      log('Preparing import template with actual resource state...');
 
-    // Set Retain on import template
-    for (const logicalId of Object.keys(importTemplate.Resources)) {
-      importTemplate.Resources[logicalId].DeletionPolicy = 'Retain';
+      // Build import template from the removal template (current stack state)
+      // and add back the resources being imported with their actual properties
+      const importTemplate = deepClone(removalTemplate);
+
+      for (const importable of allImportable) {
+        const logicalId = importable.LogicalResourceId;
+        const originalResource = originalTemplate.Resources?.[logicalId];
+        if (!originalResource) continue;
+
+        // Start with original resource definition
+        importTemplate.Resources[logicalId] = deepClone(originalResource);
+
+        // For autofix resources, override with actual (drifted) properties
+        const autofixResource = decisions.autofix.find((r) => r.logicalResourceId === logicalId);
+        if (autofixResource?.actualProperties && Object.keys(autofixResource.actualProperties).length > 0) {
+          importTemplate.Resources[logicalId].Properties = autofixResource.actualProperties;
+        }
+
+        importTemplate.Resources[logicalId].DeletionPolicy = 'Retain';
+      }
+
+      // Ensure Retain on all resources in import template
+      for (const logicalId of Object.keys(importTemplate.Resources)) {
+        importTemplate.Resources[logicalId].DeletionPolicy = 'Retain';
+      }
+
+      log('Creating import change set...');
+      const changeSetName = await client.createImportChangeSet(
+        stackInfo.stackName,
+        stringifyTemplate(importTemplate),
+        allImportable,
+        capabilities,
+      );
+
+      log('Executing import...');
+      await client.executeChangeSet(stackInfo.stackName, changeSetName);
     }
 
-    // Step 9: Create and execute import change set
-    log('Creating import change set...');
-    const changeSetName = await client.createImportChangeSet(
-      stackInfo.stackName,
-      stringifyTemplate(importTemplate),
-      importable,
-      capabilities,
-    );
-
-    log('Executing import...');
-    await client.executeChangeSet(stackInfo.stackName, changeSetName);
-
-    // Step 10: Restore original template to complete remediation
-    log('Restoring original template...');
-    await client.updateStack(
-      stackInfo.stackName,
-      originalTemplateBody,
-      stackInfo.parameters,
-      capabilities,
-    );
+    // Step 10: Restore template
+    if (decisions.remove.length > 0) {
+      // Some resources permanently removed — restore original MINUS removed resources
+      log('Restoring template (excluding removed resources)...');
+      const restoredTemplate = deepClone(originalTemplate);
+      for (const r of decisions.remove) {
+        delete restoredTemplate.Resources[r.logicalResourceId];
+      }
+      // Clean up references and outputs pointing to removed resources
+      const { template: cleanedTemplate } = transformTemplateForRemoval(
+        restoredTemplate,
+        new Set(decisions.remove.map((r) => r.logicalResourceId)),
+        resolvedValues,
+      );
+      // Restore original DeletionPolicy values (transformTemplateForRemoval sets Retain on all)
+      for (const [logicalId, resource] of Object.entries(cleanedTemplate.Resources || {})) {
+        const originalResource = originalTemplate.Resources?.[logicalId];
+        if (originalResource?.DeletionPolicy) {
+          resource.DeletionPolicy = originalResource.DeletionPolicy;
+        } else {
+          delete resource.DeletionPolicy;
+        }
+      }
+      await client.updateStack(
+        stackInfo.stackName,
+        stringifyTemplate(cleanedTemplate),
+        cleanedTemplate.Parameters ? stackInfo.parameters : undefined,
+        capabilities,
+      );
+    } else {
+      // No removals — restore exact original
+      log('Restoring original template...');
+      await client.updateStack(
+        stackInfo.stackName,
+        originalTemplateBody,
+        stackInfo.parameters,
+        capabilities,
+      );
+    }
 
     result.success = true;
-    result.remediatedResources = importable.map((r) => r.LogicalResourceId);
+    result.remediatedResources = allImportable.map((r) => r.LogicalResourceId);
+    result.removedResources = decisions.remove.map((r) => r.logicalResourceId);
 
     if (options.verbose) {
       console.log(`Remediation complete. Recovery checkpoint can be removed: ${backupPath}`);

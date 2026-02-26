@@ -20,11 +20,13 @@ program
   .option('-r, --region <region>', 'AWS region (defaults to AWS_REGION env var)')
   .option('-p, --profile <profile>', 'AWS profile to use (defaults to AWS_PROFILE env var)')
   .option('--dry-run', 'Show what would be done without making changes', false)
+  .option('-y, --yes', 'Skip interactive prompts, accept defaults', false)
   .option('-v, --verbose', 'Enable verbose output', false)
   .action(async (stackName: string, options: {
     region?: string;
     profile?: string;
     dryRun: boolean;
+    yes: boolean;
     verbose: boolean;
   }) => {
     const spinner = ora('Starting drift remediation...').start();
@@ -36,24 +38,33 @@ program
           region: options.region,
           profile: options.profile,
           dryRun: options.dryRun,
+          yes: options.yes,
           verbose: options.verbose,
         },
         spinner,
       );
 
       if (result.success) {
-        if (result.remediatedResources.length > 0) {
+        if (result.remediatedResources.length > 0 || result.removedResources.length > 0) {
           spinner.succeed(chalk.green('Drift remediation completed successfully!'));
-          console.log(chalk.cyan('\nRemediated resources:'));
-          for (const resource of result.remediatedResources) {
-            console.log(chalk.cyan(`  - ${resource}`));
+          if (result.remediatedResources.length > 0) {
+            console.log(chalk.cyan('\nRemediated resources:'));
+            for (const resource of result.remediatedResources) {
+              console.log(chalk.cyan(`  - ${resource}`));
+            }
+          }
+          if (result.removedResources.length > 0) {
+            console.log(chalk.yellow('\nRemoved from stack (still exist in AWS):'));
+            for (const resource of result.removedResources) {
+              console.log(chalk.yellow(`  - ${resource}`));
+            }
           }
         } else {
           spinner.succeed(chalk.green('Stack is already in sync - no remediation needed'));
         }
 
         if (result.skippedResources.length > 0) {
-          console.log(chalk.yellow('\nSkipped resources (not importable):'));
+          console.log(chalk.yellow('\nSkipped resources:'));
           for (const resource of result.skippedResources) {
             console.log(chalk.yellow(`  - ${resource}`));
           }
@@ -66,6 +77,12 @@ program
         process.exit(1);
       }
     } catch (error) {
+      // Handle Ctrl+C during interactive prompts
+      if (error instanceof Error && error.name === 'ExitPromptError') {
+        spinner.stop();
+        console.log(chalk.yellow('\nAborted by user'));
+        process.exit(130);
+      }
       spinner.fail(chalk.red(`Error: ${error instanceof Error ? error.message : error}`));
       process.exit(1);
     }
@@ -80,3 +97,5 @@ export * from './lib/types';
 export * from './lib/eligible-resources';
 export * from './lib/template-transformer';
 export * from './lib/resource-importer';
+export * from './lib/resource-identifier';
+export { promptForDecisions, formatDriftDiff } from './lib/interactive';
