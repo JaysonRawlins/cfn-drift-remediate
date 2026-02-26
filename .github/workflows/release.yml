@@ -113,4 +113,3 @@ jobs:
           NPM_CONFIG_PROVENANCE: "true"
           NPM_TRUSTED_PUBLISHER: "true"
         run: npx -p publib@latest publib-npm
-      - run: cd .repo && yarn install --check-files --frozen-lockfile --ignore-engines

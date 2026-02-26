@@ -89,9 +89,6 @@ releaseWorkflow.file!.addOverride('jobs.release_npm.permissions.contents', 'writ
 releaseWorkflow.file!.addOverride('jobs.release_npm.steps.0.with.node-version', '24');
 // Set registry-url so setup-node configures .npmrc for OIDC token exchange
 releaseWorkflow.file!.addOverride('jobs.release_npm.steps.0.with.registry-url', 'https://registry.npmjs.org');
-// Add --ignore-engines to yarn install since Node 24 is outside the engines range (20.x)
-releaseWorkflow.file!.addOverride('jobs.release_npm.steps.4.run',
-  'cd .repo && yarn install --check-files --frozen-lockfile --ignore-engines');
 
 // .tool-versions file for asdf
 new TextFile(project, '.tool-versions', {
