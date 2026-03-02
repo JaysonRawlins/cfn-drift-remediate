@@ -6,7 +6,7 @@ import {
   RemediationPlan,
 } from './types';
 
-const VALID_ACTIONS = new Set(['autofix', 'reimport', 'remove', 'skip']);
+const VALID_ACTIONS = new Set(['autofix', 'reimport', 'remove', 'skip', 'report_only']);
 
 /**
  * Build a RemediationPlan from drift detection results and interactive decisions.
@@ -14,6 +14,7 @@ const VALID_ACTIONS = new Set(['autofix', 'reimport', 'remove', 'skip']);
 export function buildPlan(
   metadata: PlanMetadata,
   decisions: InteractiveDecisions,
+  nonImportableModified?: DriftedResource[],
 ): RemediationPlan {
   const planDecisions: PlanDecision[] = [];
   const resources: Record<string, DriftedResource> = {};
@@ -61,6 +62,19 @@ export function buildPlan(
       action: 'skip',
     });
     resources[r.logicalResourceId] = r;
+  }
+
+  if (nonImportableModified) {
+    for (const r of nonImportableModified) {
+      planDecisions.push({
+        logicalResourceId: r.logicalResourceId,
+        resourceType: r.resourceType,
+        driftStatus: r.stackResourceDriftStatus,
+        physicalResourceId: r.physicalResourceId,
+        action: 'report_only',
+      });
+      resources[r.logicalResourceId] = r;
+    }
   }
 
   return {
@@ -176,6 +190,10 @@ export function planToDecisions(plan: RemediationPlan): {
         decisions.remove.push(resource);
         break;
       case 'skip':
+        decisions.skip.push(resource);
+        break;
+      case 'report_only':
+        // report_only resources are informational; treat as skip during execution
         decisions.skip.push(resource);
         break;
     }

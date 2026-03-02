@@ -80,6 +80,28 @@ describe('buildPlan', () => {
     expect(plan.decisions).toHaveLength(0);
     expect(Object.keys(plan._resources)).toHaveLength(0);
   });
+
+  it('creates report_only entries for nonImportableModified resources', () => {
+    const nonImportable = makeDriftedResource({
+      logicalResourceId: 'SsmParam',
+      resourceType: 'AWS::SSM::Parameter',
+    });
+    const decisions: InteractiveDecisions = {
+      autofix: [makeDriftedResource({ logicalResourceId: 'Bucket1' })],
+      reimport: [],
+      remove: [],
+      skip: [],
+    };
+
+    const plan = buildPlan(metadata, decisions, [nonImportable]);
+
+    expect(plan.decisions).toHaveLength(2);
+    const reportOnly = plan.decisions.find((d) => d.logicalResourceId === 'SsmParam');
+    expect(reportOnly).toBeDefined();
+    expect(reportOnly!.action).toBe('report_only');
+    expect(reportOnly!.resourceType).toBe('AWS::SSM::Parameter');
+    expect(plan._resources.SsmParam).toEqual(nonImportable);
+  });
 });
 
 describe('serializePlan', () => {
@@ -170,6 +192,13 @@ describe('loadPlan', () => {
     delete raw._resources;
     expect(() => loadPlan(JSON.stringify(raw), 'TestStack')).toThrow('missing _resources');
   });
+
+  it('accepts report_only as a valid action', () => {
+    const plan = validPlan();
+    const raw = JSON.parse(serializePlan(plan));
+    raw.decisions[0].action = 'report_only';
+    expect(() => loadPlan(JSON.stringify(raw), 'TestStack')).not.toThrow();
+  });
 });
 
 describe('planToDecisions', () => {
@@ -255,5 +284,26 @@ describe('planToDecisions', () => {
     expect(decisions.autofix).toHaveLength(0);
     expect(decisions.skip).toHaveLength(1);
     expect(decisions.skip[0].logicalResourceId).toBe('A');
+  });
+
+  it('treats report_only as skip during execution', () => {
+    const nonImportable = makeDriftedResource({
+      logicalResourceId: 'SsmParam',
+      resourceType: 'AWS::SSM::Parameter',
+    });
+    const decisions: InteractiveDecisions = {
+      autofix: [makeDriftedResource({ logicalResourceId: 'Bucket1' })],
+      reimport: [],
+      remove: [],
+      skip: [],
+    };
+
+    const plan = buildPlan(metadata, decisions, [nonImportable]);
+    const result = planToDecisions(plan);
+
+    expect(result.decisions.autofix).toHaveLength(1);
+    expect(result.decisions.skip).toHaveLength(1);
+    expect(result.decisions.skip[0].logicalResourceId).toBe('SsmParam');
+    expect(result.allDriftedResources).toHaveLength(2);
   });
 });

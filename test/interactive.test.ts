@@ -22,7 +22,7 @@ jest.mock('@inquirer/prompts', () => ({
 }));
 
 import { select, input, confirm } from '@inquirer/prompts';
-import { displayCascadeWarning, formatDriftDiff, promptForDecisions } from '../src/lib/interactive';
+import { displayCascadeWarning, displayNonImportableReport, formatDriftDiff, promptForDecisions } from '../src/lib/interactive';
 import { DriftedResource, PropertyDifference } from '../src/lib/types';
 
 const mockSelect = select as jest.MockedFunction<typeof select>;
@@ -262,5 +262,82 @@ describe('displayCascadeWarning', () => {
     expect(output).toContain('temporarily removed from the stack');
     expect(output).toContain('SGIngress');
     expect(output).toContain('LambdaPerm');
+  });
+});
+
+describe('displayNonImportableReport', () => {
+  it('should not print anything when both lists are empty', () => {
+    displayNonImportableReport([], []);
+    expect(console.log).not.toHaveBeenCalled();
+  });
+
+  it('should display MODIFIED non-importable resources with property diffs', () => {
+    const modified: DriftedResource = {
+      logicalResourceId: 'SsmParam',
+      resourceType: 'AWS::SSM::Parameter',
+      physicalResourceId: '/cfn-drift-test/config',
+      stackResourceDriftStatus: 'MODIFIED',
+      propertyDifferences: [
+        {
+          propertyPath: '/Value',
+          expectedValue: '"original"',
+          actualValue: '"drifted"',
+          differenceType: 'NOT_EQUAL',
+        },
+      ],
+    };
+
+    displayNonImportableReport([modified], []);
+
+    const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
+    expect(output).toContain('1 drifted resource(s) cannot be auto-remediated');
+    expect(output).toContain('MODIFIED (report only');
+    expect(output).toContain('SsmParam');
+    expect(output).toContain('AWS::SSM::Parameter');
+    expect(output).toContain('/cfn-drift-test/config');
+    expect(output).toContain('/Value');
+    expect(output).toContain('update your CDK/CloudFormation source');
+  });
+
+  it('should display DELETED non-importable resources', () => {
+    const deleted: DriftedResource = {
+      logicalResourceId: 'EphemeralParam',
+      resourceType: 'AWS::SSM::Parameter',
+      physicalResourceId: '/cfn-drift-test/ephemeral',
+      stackResourceDriftStatus: 'DELETED',
+    };
+
+    displayNonImportableReport([], [deleted]);
+
+    const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
+    expect(output).toContain('1 drifted resource(s) cannot be auto-remediated');
+    expect(output).toContain('DELETED (will be removed from template');
+    expect(output).toContain('EphemeralParam');
+    expect(output).toContain('/cfn-drift-test/ephemeral');
+    expect(output).toContain('no longer exist in AWS');
+  });
+
+  it('should display both MODIFIED and DELETED sections', () => {
+    const modified: DriftedResource = {
+      logicalResourceId: 'SsmParam',
+      resourceType: 'AWS::SSM::Parameter',
+      physicalResourceId: '/cfn-drift-test/config',
+      stackResourceDriftStatus: 'MODIFIED',
+    };
+    const deleted: DriftedResource = {
+      logicalResourceId: 'EphemeralParam',
+      resourceType: 'AWS::SSM::Parameter',
+      physicalResourceId: '/cfn-drift-test/ephemeral',
+      stackResourceDriftStatus: 'DELETED',
+    };
+
+    displayNonImportableReport([modified], [deleted]);
+
+    const output = (console.log as jest.Mock).mock.calls.flat().join('\n');
+    expect(output).toContain('2 drifted resource(s) cannot be auto-remediated');
+    expect(output).toContain('MODIFIED (report only');
+    expect(output).toContain('DELETED (will be removed from template');
+    expect(output).toContain('SsmParam');
+    expect(output).toContain('EphemeralParam');
   });
 });

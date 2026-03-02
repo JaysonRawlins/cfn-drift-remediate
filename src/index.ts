@@ -82,6 +82,15 @@ program
             console.log(chalk.yellow(`  - ${resource}`));
           }
         }
+
+        const reportOnly = result.nonImportableResources?.filter((r) => r.driftStatus === 'MODIFIED') ?? [];
+        if (reportOnly.length > 0) {
+          console.log(chalk.yellow('\nNon-importable drifted resources (manual action required):'));
+          for (const r of reportOnly) {
+            console.log(chalk.yellow(`  - ${r.logicalResourceId} (${r.resourceType})`));
+          }
+          console.log(chalk.dim('  Update your CDK/CloudFormation source to match, or revert manually.'));
+        }
       } else {
         spinner.fail(chalk.red('Drift remediation failed'));
         for (const error of result.errors) {
@@ -111,5 +120,5 @@ export * from './lib/eligible-resources';
 export * from './lib/template-transformer';
 export * from './lib/resource-importer';
 export * from './lib/resource-identifier';
-export { promptForDecisions, formatDriftDiff, displayCascadeWarning } from './lib/interactive';
+export { promptForDecisions, formatDriftDiff, displayCascadeWarning, displayNonImportableReport } from './lib/interactive';
 export { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';

@@ -101,6 +101,18 @@ export interface RemediationOptions {
 }
 
 /**
+ * A drifted resource that cannot be imported via CloudFormation.
+ * MODIFIED resources are report-only; DELETED resources are auto-removed.
+ */
+export interface NonImportableResource {
+  logicalResourceId: string;
+  resourceType: string;
+  physicalResourceId: string;
+  driftStatus: 'MODIFIED' | 'DELETED';
+  propertyDifferences?: PropertyDifference[];
+}
+
+/**
  * Result of the remediation process
  */
 export interface RemediationResult {
@@ -112,6 +124,8 @@ export interface RemediationResult {
   skippedResources: string[];
   /** List of resource logical IDs permanently removed from the stack */
   removedResources: string[];
+  /** Non-importable drifted resources reported for manual action */
+  nonImportableResources: NonImportableResource[];
   /** Error messages if any */
   errors: string[];
 }
@@ -206,7 +220,7 @@ export interface PlanDecision {
   resourceType: string;
   driftStatus: 'MODIFIED' | 'DELETED';
   physicalResourceId: string;
-  action: 'autofix' | 'reimport' | 'remove' | 'skip';
+  action: 'autofix' | 'reimport' | 'remove' | 'skip' | 'report_only';
   /** Only present when action is 'reimport' */
   reimportPhysicalId?: string;
 }

@@ -7,6 +7,7 @@ import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 
 export class DriftTestStack extends cdk.Stack {
@@ -105,6 +106,19 @@ export class DriftTestStack extends cdk.Stack {
       enabled: true,
     });
     rule.addTarget(new targets.LambdaFunction(fn));
+
+    // SSM Parameters - NOT in eligible-resources.ts, used to test non-importable reporting
+    // MODIFIED test: break script changes this value
+    new ssm.StringParameter(this, 'DriftTestParam', {
+      parameterName: '/cfn-drift-test/config',
+      stringValue: 'original-value',
+    });
+
+    // DELETED test: break script deletes this parameter
+    new ssm.StringParameter(this, 'EphemeralParam', {
+      parameterName: '/cfn-drift-test/ephemeral',
+      stringValue: 'will-be-deleted',
+    });
 
     // Stack outputs for use by break/cleanup scripts
     new cdk.CfnOutput(this, 'DbInstanceIdentifier', {

@@ -201,6 +201,56 @@ export function displayCascadeWarning(
 }
 
 /**
+ * Display a report of non-importable drifted resources.
+ * Called before interactive prompts so the user has the full picture.
+ */
+export function displayNonImportableReport(
+  modifiedNonImportable: DriftedResource[],
+  deletedNonImportable: DriftedResource[],
+): void {
+  if (modifiedNonImportable.length === 0 && deletedNonImportable.length === 0) return;
+
+  const total = modifiedNonImportable.length + deletedNonImportable.length;
+  console.log(chalk.bold.yellow(
+    `\n${total} drifted resource(s) cannot be auto-remediated (not importable by CloudFormation):`,
+  ));
+
+  if (modifiedNonImportable.length > 0) {
+    console.log(chalk.bold.yellow(
+      `\n  MODIFIED (report only - ${modifiedNonImportable.length}):`,
+    ));
+    for (const r of modifiedNonImportable) {
+      console.log(chalk.yellow(
+        `    ${r.logicalResourceId} (${r.resourceType})`,
+      ));
+      console.log(chalk.dim(`      Physical ID: ${r.physicalResourceId}`));
+      if (r.propertyDifferences && r.propertyDifferences.length > 0) {
+        console.log(chalk.dim('      Changes:'));
+        console.log(formatDriftDiff(r.propertyDifferences));
+      }
+    }
+    console.log(chalk.dim(
+      '\n  To fix: update your CDK/CloudFormation source to match the actual state, or revert the resource manually.\n',
+    ));
+  }
+
+  if (deletedNonImportable.length > 0) {
+    console.log(chalk.bold.red(
+      `\n  DELETED (will be removed from template - ${deletedNonImportable.length}):`,
+    ));
+    for (const r of deletedNonImportable) {
+      console.log(chalk.red(
+        `    ${r.logicalResourceId} (${r.resourceType})`,
+      ));
+      console.log(chalk.dim(`      Former Physical ID: ${r.physicalResourceId}`));
+    }
+    console.log(chalk.dim(
+      '\n  These resources no longer exist in AWS and will be removed from the stack template.\n',
+    ));
+  }
+}
+
+/**
  * Run the full interactive prompt flow for all drifted resources.
  * When `autoAccept` is true, returns default actions without prompting.
  */
