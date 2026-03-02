@@ -162,6 +162,25 @@ aws lambda update-function-configuration \
   --region "$REGION" \
   --profile "$PROFILE" > /dev/null
 
+# Step 7: Modify SSM Parameter value (creates MODIFIED drift on non-importable resource)
+echo ""
+echo "Step 7: Modifying SSM Parameter /cfn-drift-test/config"
+echo "  Changing value from 'original-value' to 'DRIFTED-value'"
+aws ssm put-parameter \
+  --name "/cfn-drift-test/config" \
+  --value "DRIFTED-value" \
+  --overwrite \
+  --region "$REGION" \
+  --profile "$PROFILE" > /dev/null
+
+# Step 8: Delete SSM Parameter (creates DELETED drift on non-importable resource)
+echo ""
+echo "Step 8: Deleting SSM Parameter /cfn-drift-test/ephemeral"
+aws ssm delete-parameter \
+  --name "/cfn-drift-test/ephemeral" \
+  --region "$REGION" \
+  --profile "$PROFILE"
+
 # Get replacement DB ARN
 NEW_DB_ARN=$(aws rds describe-db-instances \
   --db-instance-identifier "$NEW_DB_IDENTIFIER" \
@@ -179,6 +198,8 @@ echo "  2. MODIFIED: EC2 Instance tags ($EC2_INSTANCE_ID)"
 echo "  3. MODIFIED: S3 Bucket public access ($BUCKET_NAME)"
 echo "  4. MODIFIED: EventBridge Rule disabled ($RULE_NAME)"
 echo "  5. MODIFIED: Lambda timeout changed ($LAMBDA_NAME)"
+echo "  6. MODIFIED: SSM Parameter value changed (/cfn-drift-test/config) [non-importable]"
+echo "  7. DELETED: SSM Parameter deleted (/cfn-drift-test/ephemeral) [non-importable]"
 echo ""
 echo "Replacement DB:"
 echo "  Identifier: $NEW_DB_IDENTIFIER"
@@ -187,3 +208,5 @@ echo ""
 echo "When running remediation:"
 echo "  - For MODIFIED EC2/S3/Lambda/EventBridge: choose 'Autofix'"
 echo "  - For DELETED RDS: choose 'Re-import', enter: $NEW_DB_IDENTIFIER"
+echo "  - MODIFIED SSM Param: reported only (non-importable)"
+echo "  - DELETED SSM Param: auto-removed from template (non-importable)"

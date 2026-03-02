@@ -3,7 +3,7 @@ import * as path from 'path';
 import { Ora } from 'ora';
 import { CfnClientWrapper } from './lib/cfn-client';
 import { isResourceImportable, getAllRequiredCapabilities } from './lib/eligible-resources';
-import { displayCascadeWarning, promptForDecisions } from './lib/interactive';
+import { displayCascadeWarning, displayNonImportableReport, promptForDecisions } from './lib/interactive';
 import { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';
 import { buildResourcesToImport, buildReimportDescriptor } from './lib/resource-importer';
 import {
@@ -54,6 +54,7 @@ export async function remediate(
     remediatedResources: [],
     skippedResources: [],
     removedResources: [],
+    nonImportableResources: [],
     errors: [],
   };
 
@@ -123,28 +124,65 @@ export async function remediate(
         return result;
       }
 
-      // Filter to only importable resources
+      // Categorize drifted resources by importability and drift status
       const modifiedResources: DriftedResource[] = [];
       const deletedResources: DriftedResource[] = [];
+      const nonImportableModified: DriftedResource[] = [];
+      const nonImportableDeleted: DriftedResource[] = [];
 
       for (const resource of allDriftedResources) {
-        if (!isResourceImportable(resource.resourceType)) {
-          result.skippedResources.push(resource.logicalResourceId);
-          continue;
-        }
+        const importable = isResourceImportable(resource.resourceType);
         if (resource.stackResourceDriftStatus === 'DELETED') {
-          deletedResources.push(resource);
+          if (importable) {
+            deletedResources.push(resource);
+          } else {
+            nonImportableDeleted.push(resource);
+          }
         } else {
-          modifiedResources.push(resource);
+          if (importable) {
+            modifiedResources.push(resource);
+          } else {
+            nonImportableModified.push(resource);
+          }
         }
       }
 
-      if (modifiedResources.length === 0 && deletedResources.length === 0) {
+      // Track non-importable resources in result
+      for (const r of nonImportableModified) {
+        result.nonImportableResources.push({
+          logicalResourceId: r.logicalResourceId,
+          resourceType: r.resourceType,
+          physicalResourceId: r.physicalResourceId,
+          driftStatus: 'MODIFIED',
+          propertyDifferences: r.propertyDifferences,
+        });
+      }
+      for (const r of nonImportableDeleted) {
+        result.nonImportableResources.push({
+          logicalResourceId: r.logicalResourceId,
+          resourceType: r.resourceType,
+          physicalResourceId: r.physicalResourceId,
+          driftStatus: 'DELETED',
+        });
+      }
+
+      // Display non-importable report before prompts
+      if (nonImportableModified.length > 0 || nonImportableDeleted.length > 0) {
+        if (spinner) spinner.stop();
+        displayNonImportableReport(nonImportableModified, nonImportableDeleted);
+      }
+
+      // If all drifted resources are non-importable MODIFIED, report and return
+      if (modifiedResources.length === 0 && deletedResources.length === 0 && nonImportableDeleted.length === 0) {
+        if (nonImportableModified.length > 0) {
+          result.success = true;
+          return result;
+        }
         result.errors.push('All drifted resources are not eligible for import');
         return result;
       }
 
-      // Step 4: Interactive decisions
+      // Step 4: Interactive decisions (importable resources only)
       if (spinner) spinner.stop();
 
       decisions = await promptForDecisions(
@@ -152,6 +190,11 @@ export async function remediate(
         deletedResources,
         options.yes ?? false,
       );
+
+      // Non-importable DELETED resources are always removed (no prompt needed)
+      for (const r of nonImportableDeleted) {
+        decisions.remove.push(r);
+      }
 
       if (spinner) spinner.start('Processing...');
 
@@ -164,7 +207,7 @@ export async function remediate(
           toolVersion: packageVersion(),
           driftDetectionId: detectionId,
         };
-        const plan = buildPlan(planMetadata, decisions);
+        const plan = buildPlan(planMetadata, decisions, nonImportableModified);
         const planPath = path.resolve(options.exportPlan);
         fs.writeFileSync(planPath, serializePlan(plan));
         if (spinner) spinner.succeed(`Plan exported to ${planPath}`);
@@ -269,6 +312,13 @@ export async function remediate(
         console.log('\nResources temporarily removed and recreated:');
         for (const c of temporaryCascade) {
           console.log(`  - ${c.logicalResourceId} (${c.resourceType}) -> depends on ${c.dependsOn}`);
+        }
+      }
+      const reportOnly = result.nonImportableResources.filter((r) => r.driftStatus === 'MODIFIED');
+      if (reportOnly.length > 0) {
+        console.log('\nNon-importable drifted resources (manual action required):');
+        for (const r of reportOnly) {
+          console.log(`  - ${r.logicalResourceId} (${r.resourceType}) [MODIFIED]`);
         }
       }
       result.success = true;
