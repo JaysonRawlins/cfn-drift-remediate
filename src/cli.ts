@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import chalk from 'chalk';
 import { Ora } from 'ora';
 import { CfnClientWrapper } from './lib/cfn-client';
 import { isResourceImportable, getAllRequiredCapabilities } from './lib/eligible-resources';
@@ -47,6 +48,7 @@ export async function remediate(
   const client = new CfnClientWrapper({
     region: options.region,
     profile: options.profile,
+    s3BucketName: options.s3Bucket,
   });
 
   const result: RemediationResult = {
@@ -103,12 +105,21 @@ export async function remediate(
       log('Waiting for drift detection to complete...');
       const detectionResult = await client.waitForDriftDetection(detectionId);
 
-      if (detectionResult.status !== 'DETECTION_COMPLETE') {
+      if (detectionResult.status !== 'DETECTION_COMPLETE' && detectionResult.status !== 'DETECTION_FAILED') {
         result.errors.push(`Drift detection did not complete: ${detectionResult.status}`);
         return result;
       }
 
-      if (detectionResult.driftStatus === 'IN_SYNC') {
+      // When detection failed for some resources, warn but continue with partial results
+      if (detectionResult.status === 'DETECTION_FAILED') {
+        if (spinner) spinner.stop();
+        console.log(chalk.yellow(
+          `\nWarning: Drift detection failed for some resources:\n  ${detectionResult.statusReason}`,
+        ));
+        console.log(chalk.dim('Continuing with resources that were successfully checked.\n'));
+      }
+
+      if (detectionResult.driftStatus === 'IN_SYNC' && detectionResult.status === 'DETECTION_COMPLETE') {
         if (spinner) spinner.succeed('Stack is in sync - no drift detected');
         result.success = true;
         return result;
@@ -119,6 +130,12 @@ export async function remediate(
       allDriftedResources = await client.getDriftedResources(stackInfo.stackId);
 
       if (allDriftedResources.length === 0) {
+        if (detectionResult.status === 'DETECTION_FAILED') {
+          result.errors.push(
+            `Drift detection failed and no drifted resources could be detected: ${detectionResult.statusReason}`,
+          );
+          return result;
+        }
         if (spinner) spinner.succeed('No drifted resources found');
         result.success = true;
         return result;
@@ -229,7 +246,7 @@ export async function remediate(
     }
 
     // Step 5: Build resources to import from decisions
-    const resourceIdentifiers = await client.getResourceIdentifiers(originalTemplateBody);
+    const resourceIdentifiers = await client.getResourceIdentifiers(stackInfo.stackId);
 
     // Autofix resources: use existing buildResourcesToImport
     const { importable: autofixImportable, skipped: autofixSkipped } =
@@ -354,8 +371,11 @@ export async function remediate(
     }
 
     // Step 6: Set DeletionPolicy: Retain on all resources
-    // DELETED resources must be removed from the template first — CloudFormation
-    // cannot update metadata on resources that no longer exist in AWS.
+    // Two-phase approach when DELETED resources exist:
+    //   Phase 1: Set Retain on all non-DELETED resources (so cascade-dependent
+    //            resources have Retain BEFORE they are removed from the template).
+    //   Phase 2: Remove DELETED resources + cascade-remove their dependents
+    //            (cascade-removed resources already have Retain in CloudFormation).
     log('Setting DeletionPolicy: Retain on all resources...');
     const deletedLogicalIds = new Set(
       allDriftedResources
@@ -366,13 +386,41 @@ export async function remediate(
     let retainTemplate = setRetentionOnAllResources(originalTemplate);
 
     if (deletedLogicalIds.size > 0) {
-      // Remove deleted resources and clean up their dangling references
+      // Phase 1: Set Retain on all non-DELETED resources first.
+      // Restore original DeletionPolicy on DELETED resources — CloudFormation
+      // cannot update metadata on resources that no longer exist in AWS.
+      for (const deletedId of deletedLogicalIds) {
+        if (retainTemplate.Resources?.[deletedId]) {
+          const original = originalTemplate.Resources?.[deletedId];
+          if (original?.DeletionPolicy) {
+            retainTemplate.Resources[deletedId].DeletionPolicy = original.DeletionPolicy;
+          } else {
+            delete retainTemplate.Resources[deletedId].DeletionPolicy;
+          }
+        }
+      }
+
+      await client.updateStack(
+        stackInfo.stackId,
+        stringifyTemplate(retainTemplate),
+        retainTemplate.Parameters ? stackInfo.parameters : undefined,
+        capabilities,
+      );
+
+      const retainedCount = Object.keys(retainTemplate.Resources || {}).length - deletedLogicalIds.size;
+      log(`DeletionPolicy: Retain verified on all ${retainedCount} resources. Proceeding to remove deleted resources...`);
+
+      // Phase 2: Remove DELETED resources and cascade-remove their dependents.
+      // Cascade-removed resources now have DeletionPolicy: Retain in CloudFormation.
       const { template: cleanedTemplate } = transformTemplateForRemoval(
         retainTemplate,
         deletedLogicalIds,
         new Map(), // no resolved values — just strip unresolvable references
       );
       retainTemplate = cleanedTemplate;
+    } else {
+      const retainedCount = Object.keys(retainTemplate.Resources || {}).length;
+      log(`DeletionPolicy: Retain verified on all ${retainedCount} resources. Proceeding...`);
     }
 
     await client.updateStack(
@@ -516,6 +564,8 @@ export async function remediate(
 
   } catch (error) {
     result.errors.push(error instanceof Error ? error.message : String(error));
+  } finally {
+    await client.cleanupTemplates();
   }
 
   return result;

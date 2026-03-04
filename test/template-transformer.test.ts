@@ -505,3 +505,84 @@ describe('analyzeCascadeRemovals', () => {
     expect(result).toEqual([]);
   });
 });
+
+describe('two-phase DELETED resource removal', () => {
+  // Simulates the two-phase Step 6 flow from cli.ts to verify that
+  // cascade-dependent resources have DeletionPolicy: Retain before removal.
+  const template: CloudFormationTemplate = {
+    Resources: {
+      DB: { Type: 'AWS::RDS::DBInstance', Properties: { Engine: 'postgres' } },
+      SGIngress: {
+        Type: 'AWS::EC2::SecurityGroupIngress',
+        Properties: {
+          GroupId: 'sg-12345',
+          FromPort: { 'Fn::GetAtt': ['DB', 'Endpoint.Port'] },
+          ToPort: { 'Fn::GetAtt': ['DB', 'Endpoint.Port'] },
+        },
+      },
+      Secret: {
+        Type: 'AWS::SecretsManager::SecretTargetAttachment',
+        Properties: { TargetId: { Ref: 'DB' } },
+      },
+      Bucket: { Type: 'AWS::S3::Bucket', Properties: {} },
+    },
+  };
+
+  it('Phase 1: setRetentionOnAllResources preserves cascade-dependent resources with Retain', () => {
+    const retainTemplate = setRetentionOnAllResources(template);
+
+    // All resources should have Retain, including cascade-dependent ones
+    expect(retainTemplate.Resources.DB.DeletionPolicy).toBe('Retain');
+    expect(retainTemplate.Resources.SGIngress.DeletionPolicy).toBe('Retain');
+    expect(retainTemplate.Resources.Secret.DeletionPolicy).toBe('Retain');
+    expect(retainTemplate.Resources.Bucket.DeletionPolicy).toBe('Retain');
+
+    // Restore original DeletionPolicy on DELETED resource (simulating cli.ts Phase 1)
+    delete retainTemplate.Resources.DB.DeletionPolicy;
+
+    // Cascade-dependent resources still have Retain
+    expect(retainTemplate.Resources.SGIngress.DeletionPolicy).toBe('Retain');
+    expect(retainTemplate.Resources.Secret.DeletionPolicy).toBe('Retain');
+  });
+
+  it('Phase 2: transformTemplateForRemoval cascade-removes dependents after Retain is set', () => {
+    const retainTemplate = setRetentionOnAllResources(template);
+    delete retainTemplate.Resources.DB.DeletionPolicy;
+
+    // Phase 2: remove DELETED resource + cascade
+    const deletedIds = new Set(['DB']);
+    const result = transformTemplateForRemoval(retainTemplate, deletedIds, new Map());
+
+    // DB and its dependents should be removed
+    expect(result.template.Resources.DB).toBeUndefined();
+    expect(result.template.Resources.SGIngress).toBeUndefined();
+    expect(result.template.Resources.Secret).toBeUndefined();
+    expect(result.removedResources).toContain('DB');
+    expect(result.removedResources).toContain('SGIngress');
+    expect(result.removedResources).toContain('Secret');
+
+    // Independent resource should remain with Retain
+    expect(result.template.Resources.Bucket).toBeDefined();
+    expect(result.template.Resources.Bucket.DeletionPolicy).toBe('Retain');
+  });
+
+  it('Phase 1 template includes cascade-dependent resources that Phase 2 removes', () => {
+    // This test verifies the key invariant: the Phase 1 template sent to CloudFormation
+    // includes cascade-dependent resources with Retain, so CloudFormation applies Retain
+    // BEFORE Phase 2 removes them.
+    const retainTemplate = setRetentionOnAllResources(template);
+    delete retainTemplate.Resources.DB.DeletionPolicy;
+
+    // Phase 1 template still has cascade-dependent resources
+    expect(Object.keys(retainTemplate.Resources)).toEqual(
+      expect.arrayContaining(['DB', 'SGIngress', 'Secret', 'Bucket']),
+    );
+    expect(retainTemplate.Resources.SGIngress.DeletionPolicy).toBe('Retain');
+    expect(retainTemplate.Resources.Secret.DeletionPolicy).toBe('Retain');
+
+    // After Phase 2, they're removed
+    const result = transformTemplateForRemoval(retainTemplate, new Set(['DB']), new Map());
+    expect(Object.keys(result.template.Resources)).not.toContain('SGIngress');
+    expect(Object.keys(result.template.Resources)).not.toContain('Secret');
+  });
+});

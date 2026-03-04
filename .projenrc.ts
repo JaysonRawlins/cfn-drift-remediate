@@ -44,6 +44,8 @@ const project = new typescript.TypeScriptProject({
   // Runtime Dependencies
   deps: [
     '@aws-sdk/client-cloudformation',
+    '@aws-sdk/client-s3',
+    '@aws-sdk/client-sts',
     '@aws-sdk/credential-providers',
     'commander',
     'yaml-cfn',
@@ -62,6 +64,7 @@ const project = new typescript.TypeScriptProject({
   tsconfig: {
     compilerOptions: {
       esModuleInterop: true,
+      skipLibCheck: true,
       types: ['node'],
     },
   },

@@ -14,13 +14,18 @@ import {
   ChangeSetType,
   Capability,
 } from '@aws-sdk/client-cloudformation';
+import { S3Client, PutObjectCommand, DeleteObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers';
 import { DriftedResource, ResourceToImport } from './types';
 import { sleep } from './utils';
 
+const MAX_TEMPLATE_BODY_BYTES = 51_200;
+
 export interface CfnClientOptions {
   region?: string;
   profile?: string;
+  s3BucketName?: string;
 }
 
 export interface StackInfo {
@@ -35,18 +40,115 @@ export interface StackInfo {
  */
 export class CfnClientWrapper {
   private client: CloudFormationClient;
+  private credentials: ReturnType<typeof fromNodeProviderChain>;
+  private s3Client?: S3Client;
+  private stsClient?: STSClient;
+  private s3BucketName?: string;
+  private resolvedBucket?: string;
+  private uploadedKeys: string[] = [];
   public readonly region: string;
 
   constructor(options: CfnClientOptions = {}) {
     this.region = options.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
+    this.s3BucketName = options.s3BucketName;
 
     const profile = options.profile || process.env.AWS_PROFILE;
-    const credentials = fromNodeProviderChain(profile ? { profile } : undefined);
+    this.credentials = fromNodeProviderChain(profile ? { profile } : undefined);
 
     this.client = new CloudFormationClient({
       region: this.region,
-      credentials,
+      credentials: this.credentials,
     });
+  }
+
+  private getS3Client(): S3Client {
+    if (!this.s3Client) {
+      this.s3Client = new S3Client({ region: this.region, credentials: this.credentials });
+    }
+    return this.s3Client;
+  }
+
+  private getStsClient(): STSClient {
+    if (!this.stsClient) {
+      this.stsClient = new STSClient({ region: this.region, credentials: this.credentials });
+    }
+    return this.stsClient;
+  }
+
+  /**
+   * Resolve an S3 bucket for template uploads.
+   * Priority: explicit s3BucketName > CDK bootstrap bucket auto-detect.
+   */
+  private async resolveBucket(): Promise<string> {
+    if (this.resolvedBucket) return this.resolvedBucket;
+
+    if (this.s3BucketName) {
+      this.resolvedBucket = this.s3BucketName;
+      return this.resolvedBucket;
+    }
+
+    // Try CDK bootstrap bucket: cdk-hnb659fds-assets-{accountId}-{region}
+    try {
+      const identity = await this.getStsClient().send(new GetCallerIdentityCommand({}));
+      const accountId = identity.Account;
+      if (accountId) {
+        const cdkBucket = `cdk-hnb659fds-assets-${accountId}-${this.region}`;
+        await this.getS3Client().send(new HeadBucketCommand({ Bucket: cdkBucket }));
+        this.resolvedBucket = cdkBucket;
+        return this.resolvedBucket;
+      }
+    } catch {
+      // CDK bootstrap bucket not found — fall through to error
+    }
+
+    throw new Error(
+      'Template exceeds 51,200-byte CloudFormation limit and no S3 bucket is available for upload. '
+      + 'Provide a bucket via --s3-bucket, or bootstrap CDK in this account/region (npx cdk bootstrap).',
+    );
+  }
+
+  /**
+   * Resolve template for CloudFormation API calls.
+   * Small templates use TemplateBody directly; large ones are uploaded to S3.
+   */
+  private async resolveTemplate(templateBody: string): Promise<{ TemplateBody?: string; TemplateURL?: string }> {
+    if (Buffer.byteLength(templateBody, 'utf-8') <= MAX_TEMPLATE_BODY_BYTES) {
+      return { TemplateBody: templateBody };
+    }
+
+    const bucket = await this.resolveBucket();
+    const key = `cfn-drift-remediate/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+
+    await this.getS3Client().send(new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: templateBody,
+      ContentType: 'application/json',
+    }));
+
+    this.uploadedKeys.push(key);
+
+    const templateUrl = `https://s3.${this.region}.amazonaws.com/${bucket}/${key}`;
+    return { TemplateURL: templateUrl };
+  }
+
+  /**
+   * Clean up any templates uploaded to S3 during this session. Best-effort.
+   */
+  async cleanupTemplates(): Promise<void> {
+    if (this.uploadedKeys.length === 0) return;
+
+    const bucket = this.resolvedBucket;
+    if (!bucket) return;
+
+    for (const key of this.uploadedKeys) {
+      try {
+        await this.getS3Client().send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+      } catch {
+        // Best-effort cleanup — ignore failures
+      }
+    }
+    this.uploadedKeys = [];
   }
 
   /**
@@ -121,6 +223,7 @@ export class CfnClientWrapper {
   async waitForDriftDetection(detectionId: string): Promise<{
     status: string;
     driftStatus?: string;
+    statusReason?: string;
   }> {
     let status = 'DETECTION_IN_PROGRESS';
 
@@ -139,13 +242,18 @@ export class CfnClientWrapper {
         return {
           status,
           driftStatus: response.StackDriftStatus,
+          statusReason: response.DetectionStatusReason,
         };
       }
 
       if (status === 'DETECTION_FAILED') {
-        throw new Error(
-          `Drift detection failed: ${response.DetectionStatusReason || 'Unknown reason'}`,
-        );
+        // Partial failure — some resources may have been successfully checked.
+        // Return instead of throwing so the caller can proceed with partial results.
+        return {
+          status,
+          driftStatus: response.StackDriftStatus,
+          statusReason: response.DetectionStatusReason || 'Unknown reason',
+        };
       }
     }
 
@@ -204,11 +312,12 @@ export class CfnClientWrapper {
   }
 
   /**
-   * Get resource identifier summaries from template
+   * Get resource identifier summaries for a stack.
+   * Uses StackName to avoid the 51,200-byte TemplateBody size limit.
    */
-  async getResourceIdentifiers(templateBody: string): Promise<Map<string, string[]>> {
+  async getResourceIdentifiers(stackName: string): Promise<Map<string, string[]>> {
     const response = await this.client.send(
-      new GetTemplateSummaryCommand({ TemplateBody: templateBody }),
+      new GetTemplateSummaryCommand({ StackName: stackName }),
     );
 
     const identifiers = new Map<string, string[]>();
@@ -231,10 +340,12 @@ export class CfnClientWrapper {
     capabilities: string[] = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
   ): Promise<void> {
     try {
+      const templateParam = await this.resolveTemplate(templateBody);
+
       await this.client.send(
         new UpdateStackCommand({
           StackName: stackName,
-          TemplateBody: templateBody,
+          ...templateParam,
           Parameters: parameters?.map((p) => ({
             ParameterKey: p.ParameterKey,
             ParameterValue: p.ParameterValue,
@@ -302,13 +413,14 @@ export class CfnClientWrapper {
     capabilities: string[] = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'],
   ): Promise<string> {
     const changeSetName = `drift-remediate-${Date.now()}`;
+    const templateParam = await this.resolveTemplate(templateBody);
 
     await this.client.send(
       new CreateChangeSetCommand({
         StackName: stackName,
         ChangeSetName: changeSetName,
         ChangeSetType: ChangeSetType.IMPORT,
-        TemplateBody: templateBody,
+        ...templateParam,
         ResourcesToImport: resourcesToImport.map((r) => ({
           ResourceType: r.ResourceType,
           LogicalResourceId: r.LogicalResourceId,

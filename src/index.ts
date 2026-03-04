@@ -24,6 +24,7 @@ program
   .option('-v, --verbose', 'Enable verbose output', false)
   .option('--export-plan <file>', 'Export remediation plan to file without executing')
   .option('--apply-plan <file>', 'Apply a previously exported remediation plan')
+  .option('--s3-bucket <bucket>', 'S3 bucket for uploading large templates (auto-detects CDK bootstrap bucket)')
   .action(async (stackName: string, options: {
     region?: string;
     profile?: string;
@@ -32,6 +33,7 @@ program
     verbose: boolean;
     exportPlan?: string;
     applyPlan?: string;
+    s3Bucket?: string;
   }) => {
     if (options.exportPlan && options.applyPlan) {
       console.error(chalk.red('Error: --export-plan and --apply-plan are mutually exclusive'));
@@ -51,6 +53,7 @@ program
           verbose: options.verbose,
           exportPlan: options.exportPlan,
           applyPlan: options.applyPlan,
+          s3Bucket: options.s3Bucket,
         },
         spinner,
       );

@@ -98,6 +98,8 @@ export interface RemediationOptions {
   exportPlan?: string;
   /** File path to load and apply a previously exported remediation plan */
   applyPlan?: string;
+  /** S3 bucket for uploading large templates (auto-detects CDK bootstrap bucket if omitted) */
+  s3Bucket?: string;
 }
 
 /**
