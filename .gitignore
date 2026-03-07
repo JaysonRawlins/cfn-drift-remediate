@@ -48,4 +48,5 @@ junit.xml
 !/.eslintrc.json
 !/.tool-versions
 .cfn-drift-remediate-backup-*
+plan.json
 !/.projenrc.ts

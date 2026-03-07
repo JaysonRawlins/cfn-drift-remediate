@@ -76,6 +76,10 @@
       "type": "build"
     },
     {
+      "name": "@aws-sdk/client-cloudcontrol",
+      "type": "runtime"
+    },
+    {
       "name": "@aws-sdk/client-cloudformation",
       "type": "runtime"
     },

@@ -278,6 +278,68 @@ function resolveSubArrayForm(
 }
 
 /**
+ * Walk template properties and actual properties in parallel. When a template
+ * value contains a Ref/GetAtt to a deleted resource, record the corresponding
+ * actual value as the resolved value.
+ */
+export function extractResolvedValues(
+  templateValue: unknown,
+  actualValue: unknown,
+  deletedLogicalIds: Set<string>,
+  resolvedValues: Map<string, unknown>,
+): void {
+  if (templateValue === null || templateValue === undefined || typeof templateValue !== 'object') {
+    return;
+  }
+
+  const tObj = templateValue as Record<string, unknown>;
+
+  // Handle Ref to deleted resource
+  if ('Ref' in tObj && typeof tObj.Ref === 'string' && deletedLogicalIds.has(tObj.Ref)) {
+    resolvedValues.set(`Ref:${tObj.Ref}`, actualValue);
+    return;
+  }
+
+  // Handle Fn::GetAtt to deleted resource
+  if ('Fn::GetAtt' in tObj) {
+    const getAtt = tObj['Fn::GetAtt'];
+    let logicalId: string | undefined;
+    let attributeName: string | undefined;
+
+    if (Array.isArray(getAtt) && getAtt.length === 2) {
+      [logicalId, attributeName] = getAtt as [string, string];
+    } else if (typeof getAtt === 'string') {
+      const parts = getAtt.split('.');
+      logicalId = parts[0];
+      attributeName = parts.slice(1).join('.');
+    }
+
+    if (logicalId && attributeName && deletedLogicalIds.has(logicalId)) {
+      resolvedValues.set(`GetAtt:${logicalId}:${attributeName}`, actualValue);
+      return;
+    }
+  }
+
+  // Handle arrays — walk in parallel
+  if (Array.isArray(templateValue) && Array.isArray(actualValue)) {
+    for (let i = 0; i < Math.min(templateValue.length, actualValue.length); i++) {
+      extractResolvedValues(templateValue[i], actualValue[i], deletedLogicalIds, resolvedValues);
+    }
+    return;
+  }
+
+  // Handle objects — walk matching keys in parallel
+  if (typeof templateValue === 'object' && typeof actualValue === 'object' && actualValue !== null) {
+    const aObj = actualValue as Record<string, unknown>;
+    for (const key of Object.keys(tObj)) {
+      if (key in aObj) {
+        extractResolvedValues(tObj[key], aObj[key], deletedLogicalIds, resolvedValues);
+      }
+    }
+  }
+}
+
+/**
  * Collect all Ref/GetAtt references to drifted resources in a template
  */
 export function collectReferences(
@@ -356,6 +418,84 @@ export function hasUnresolvedReferences(
   }
 
   return false;
+}
+
+/**
+ * Replace Ref/GetAtt/Fn::Sub references to removed resources with a placeholder string.
+ * Used to keep cascade-dependent resources in the template temporarily (with valid syntax)
+ * while the removed resources are deleted.
+ */
+export function neutralizeBrokenReferences(
+  value: unknown,
+  removedLogicalIds: Set<string>,
+  placeholder: string = 'PLACEHOLDER',
+): unknown {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => neutralizeBrokenReferences(item, removedLogicalIds, placeholder));
+  }
+
+  const obj = value as Record<string, unknown>;
+
+  if ('Ref' in obj && typeof obj.Ref === 'string') {
+    if (removedLogicalIds.has(obj.Ref)) {
+      return placeholder;
+    }
+    return obj;
+  }
+
+  if ('Fn::GetAtt' in obj) {
+    const getAtt = obj['Fn::GetAtt'];
+    if (Array.isArray(getAtt) && getAtt.length >= 1 && removedLogicalIds.has(getAtt[0] as string)) {
+      return placeholder;
+    }
+    if (typeof getAtt === 'string' && removedLogicalIds.has(getAtt.split('.')[0])) {
+      return placeholder;
+    }
+    return obj;
+  }
+
+  if ('Fn::Sub' in obj) {
+    const subValue = obj['Fn::Sub'];
+    if (typeof subValue === 'string') {
+      let result = subValue;
+      for (const match of subValue.matchAll(SUB_VARIABLE_PATTERN)) {
+        const varName = match[1];
+        if (CFN_PSEUDO_REFS.has(varName)) continue;
+        const logicalId = varName.includes('.') ? varName.split('.')[0] : varName;
+        if (removedLogicalIds.has(logicalId)) {
+          result = result.replace(match[0], placeholder);
+        }
+      }
+      if (result !== subValue) {
+        return result;
+      }
+      return obj;
+    }
+    if (Array.isArray(subValue) && subValue.length === 2) {
+      let templateStr = subValue[0] as string;
+      for (const match of templateStr.matchAll(SUB_VARIABLE_PATTERN)) {
+        const varName = match[1];
+        if (CFN_PSEUDO_REFS.has(varName)) continue;
+        const logicalId = varName.includes('.') ? varName.split('.')[0] : varName;
+        if (removedLogicalIds.has(logicalId)) {
+          templateStr = templateStr.replace(match[0], placeholder);
+        }
+      }
+      const resolvedMap = neutralizeBrokenReferences(subValue[1], removedLogicalIds, placeholder);
+      return { 'Fn::Sub': [templateStr, resolvedMap] };
+    }
+    return obj;
+  }
+
+  const result: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(obj)) {
+    result[key] = neutralizeBrokenReferences(val, removedLogicalIds, placeholder);
+  }
+  return result;
 }
 
 /**

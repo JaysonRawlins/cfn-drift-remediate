@@ -4,6 +4,7 @@ import {
   CascadeRemoval,
   DriftedResource,
   InteractiveDecisions,
+  PreflightWarning,
   ResourceAction,
   PropertyDifference,
 } from './types';
@@ -248,6 +249,58 @@ export function displayNonImportableReport(
       '\n  These resources no longer exist in AWS and will be removed from the stack template.\n',
     ));
   }
+}
+
+/**
+ * Display a message about DELETED resources that cannot be safely remediated
+ * because their cascade dependencies lack CloudControl read support.
+ */
+export function displayBlockedDeletedResources(
+  blockedIds: string[],
+  cascadeRemovals: Array<{ logicalResourceId: string; resourceType: string; dependsOn: string }>,
+  allDriftedResources: DriftedResource[],
+): void {
+  if (blockedIds.length === 0) return;
+
+  console.log(chalk.bold.yellow(
+    `\n${blockedIds.length} DELETED resource(s) cannot be safely remediated and will be skipped:`,
+  ));
+  for (const id of blockedIds) {
+    const resource = allDriftedResources.find((r) => r.logicalResourceId === id);
+    const resourceType = resource?.resourceType ?? 'Unknown';
+    console.log(chalk.yellow(`  - ${id} (${resourceType})`));
+
+    const deps = cascadeRemovals.filter((c) => c.dependsOn === id);
+    for (const dep of deps) {
+      console.log(chalk.dim(`    cascade dep: ${dep.logicalResourceId} (${dep.resourceType}) — lacks CloudControl read support`));
+    }
+  }
+  console.log(chalk.dim(
+    '\nThese resources have cascade dependencies whose properties cannot be read via CloudControl.\n'
+    + 'Skipping them prevents data loss. MODIFIED resources are unaffected and will still be remediated.\n',
+  ));
+  // Future: restrictive CloudFormation service role (--role-arn) that denies resource deletion
+  // could allow DELETED resource remediation without CloudControl
+}
+
+/**
+ * Display warnings about resource types that don't support CloudControl read.
+ * These resources may have broken references that can't be resolved automatically.
+ */
+export function displayPreflightWarnings(warnings: PreflightWarning[]): void {
+  if (warnings.length === 0) return;
+
+  console.log(chalk.bold.yellow(
+    `\nWarning: ${warnings.length} resource type(s) may not support CloudControl read operations:`,
+  ));
+  for (const w of warnings) {
+    console.log(chalk.yellow(`  - ${w.resourceType}: ${w.reason}`));
+  }
+  console.log(chalk.dim(
+    '\nIf these resources have cross-references (Ref/GetAtt) to removed resources,\n'
+    + 'their broken references cannot be automatically resolved. CloudFormation will\n'
+    + 'fail safely during the update (no resources will be deleted).\n',
+  ));
 }
 
 /**

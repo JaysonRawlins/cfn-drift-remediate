@@ -1,10 +1,15 @@
+import { CloudControlClient, GetResourceCommand } from '@aws-sdk/client-cloudcontrol';
 import {
   CloudFormationClient,
   DescribeStacksCommand,
   GetTemplateCommand,
   DetectStackDriftCommand,
   DescribeStackDriftDetectionStatusCommand,
+  DescribeStackResourceCommand,
   DescribeStackResourceDriftsCommand,
+  DescribeStackEventsCommand,
+  DescribeTypeCommand,
+  ListStackResourcesCommand,
   UpdateStackCommand,
   CreateChangeSetCommand,
   DescribeChangeSetCommand,
@@ -31,6 +36,7 @@ export interface CfnClientOptions {
 export interface StackInfo {
   stackId: string;
   stackName: string;
+  stackStatus: string;
   parameters: Array<{ ParameterKey?: string; ParameterValue?: string }>;
   outputs?: Array<{ OutputKey?: string; OutputValue?: string }>;
 }
@@ -41,11 +47,13 @@ export interface StackInfo {
 export class CfnClientWrapper {
   private client: CloudFormationClient;
   private credentials: ReturnType<typeof fromNodeProviderChain>;
+  private cloudControlClient?: CloudControlClient;
   private s3Client?: S3Client;
   private stsClient?: STSClient;
   private s3BucketName?: string;
   private resolvedBucket?: string;
   private uploadedKeys: string[] = [];
+  private resourceTypeCache = new Map<string, { provisioningType?: string; hasReadHandler: boolean } | undefined>();
   public readonly region: string;
 
   constructor(options: CfnClientOptions = {}) {
@@ -59,6 +67,13 @@ export class CfnClientWrapper {
       region: this.region,
       credentials: this.credentials,
     });
+  }
+
+  private getCloudControlClient(): CloudControlClient {
+    if (!this.cloudControlClient) {
+      this.cloudControlClient = new CloudControlClient({ region: this.region, credentials: this.credentials });
+    }
+    return this.cloudControlClient;
   }
 
   private getS3Client(): S3Client {
@@ -167,6 +182,7 @@ export class CfnClientWrapper {
     return {
       stackId: stack.StackId!,
       stackName: stack.StackName!,
+      stackStatus: stack.StackStatus!,
       parameters: stack.Parameters?.map((p) => ({
         ParameterKey: p.ParameterKey,
         ParameterValue: p.ParameterValue,
@@ -365,9 +381,57 @@ export class CfnClientWrapper {
   }
 
   /**
+   * Get recent stack events, optionally filtered to events after a given timestamp.
+   */
+  async getRecentStackEvents(
+    stackName: string,
+    sinceTimestamp?: Date,
+  ): Promise<Array<{
+      timestamp: Date;
+      resourceType: string;
+      logicalResourceId: string;
+      resourceStatus: string;
+      resourceStatusReason?: string;
+    }>> {
+    const response = await this.client.send(
+      new DescribeStackEventsCommand({ StackName: stackName }),
+    );
+
+    const events = (response.StackEvents || [])
+      .filter((e) => !sinceTimestamp || (e.Timestamp && e.Timestamp >= sinceTimestamp))
+      .map((e) => ({
+        timestamp: e.Timestamp!,
+        resourceType: e.ResourceType || '',
+        logicalResourceId: e.LogicalResourceId || '',
+        resourceStatus: e.ResourceStatus || '',
+        resourceStatusReason: e.ResourceStatusReason,
+      }));
+
+    return events;
+  }
+
+  private formatFailedEvents(
+    events: Array<{
+      resourceType: string;
+      logicalResourceId: string;
+      resourceStatus: string;
+      resourceStatusReason?: string;
+    }>,
+  ): string {
+    const failedEvents = events.filter((e) => e.resourceStatus.includes('FAILED'));
+    if (failedEvents.length === 0) return '';
+
+    const lines = failedEvents.map(
+      (e) => `  - ${e.logicalResourceId} (${e.resourceType}): ${e.resourceStatus} — ${e.resourceStatusReason || 'No reason given'}`,
+    );
+    return '\nFailed resource events:\n' + lines.join('\n');
+  }
+
+  /**
    * Wait for stack update to complete
    */
   async waitForStackUpdate(stackName: string, maxWaitMinutes: number = 60): Promise<void> {
+    const startTime = new Date();
     const maxAttempts = maxWaitMinutes * 6; // Check every 10 seconds
     let attempts = 0;
 
@@ -391,12 +455,26 @@ export class CfnClientWrapper {
           return;
         }
         if (status === 'UPDATE_ROLLBACK_COMPLETE') {
-          throw new Error(`Stack update rolled back: ${stack.StackStatusReason || 'Unknown reason'}`);
+          let message = `Stack update rolled back: ${stack.StackStatusReason || 'Unknown reason'}`;
+          try {
+            const events = await this.getRecentStackEvents(stackName, startTime);
+            message += this.formatFailedEvents(events);
+          } catch {
+            // Best-effort event tailing
+          }
+          throw new Error(message);
         }
       }
 
       if (status?.endsWith('_FAILED')) {
-        throw new Error(`Stack operation failed: ${status} - ${stack.StackStatusReason || 'Unknown reason'}`);
+        let message = `Stack operation failed: ${status} - ${stack.StackStatusReason || 'Unknown reason'}`;
+        try {
+          const events = await this.getRecentStackEvents(stackName, startTime);
+          message += this.formatFailedEvents(events);
+        } catch {
+          // Best-effort event tailing
+        }
+        throw new Error(message);
       }
     }
 
@@ -469,6 +547,115 @@ export class CfnClientWrapper {
     }
 
     throw new Error(`Timeout waiting for change set creation after ${maxWaitMinutes} minutes`);
+  }
+
+  /**
+   * Get the physical resource ID for a stack resource.
+   */
+  async getPhysicalResourceId(stackName: string, logicalResourceId: string): Promise<string | undefined> {
+    try {
+      const response = await this.client.send(
+        new DescribeStackResourceCommand({
+          StackName: stackName,
+          LogicalResourceId: logicalResourceId,
+        }),
+      );
+      return response.StackResourceDetail?.PhysicalResourceId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Get all logical resource IDs currently in the stack.
+   * Paginates ListStackResources to collect the full set.
+   */
+  async getStackResourceIds(stackName: string): Promise<Set<string>> {
+    const ids = new Set<string>();
+    let nextToken: string | undefined;
+
+    do {
+      const response = await this.client.send(
+        new ListStackResourcesCommand({
+          StackName: stackName,
+          NextToken: nextToken,
+        }),
+      );
+
+      for (const summary of response.StackResourceSummaries || []) {
+        if (summary.LogicalResourceId) {
+          ids.add(summary.LogicalResourceId);
+        }
+      }
+
+      nextToken = response.NextToken;
+    } while (nextToken);
+
+    return ids;
+  }
+
+  /**
+   * Read actual properties of a resource via CloudControl API.
+   * Returns parsed properties or undefined if the resource type is unsupported.
+   */
+  async getResourceProperties(
+    typeName: string,
+    identifier: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    try {
+      const response = await this.getCloudControlClient().send(
+        new GetResourceCommand({
+          TypeName: typeName,
+          Identifier: identifier,
+        }),
+      );
+      const props = response.ResourceDescription?.Properties;
+      return props ? JSON.parse(props) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Describe a CloudFormation resource type to check its provisioning type and handler support.
+   * Results are cached per run. Returns undefined if the type cannot be described (API error, not found).
+   */
+  async describeResourceType(typeName: string): Promise<{
+    provisioningType?: string;
+    hasReadHandler: boolean;
+  } | undefined> {
+    if (this.resourceTypeCache.has(typeName)) {
+      return this.resourceTypeCache.get(typeName);
+    }
+
+    try {
+      const response = await this.client.send(
+        new DescribeTypeCommand({
+          Type: 'RESOURCE',
+          TypeName: typeName,
+        }),
+      );
+
+      let hasReadHandler = false;
+      if (response.Schema) {
+        try {
+          const schema = JSON.parse(response.Schema);
+          hasReadHandler = !!(schema.handlers && schema.handlers.read);
+        } catch {
+          hasReadHandler = false;
+        }
+      }
+
+      const result = {
+        provisioningType: response.ProvisioningType,
+        hasReadHandler,
+      };
+      this.resourceTypeCache.set(typeName, result);
+      return result;
+    } catch {
+      this.resourceTypeCache.set(typeName, undefined);
+      return undefined;
+    }
   }
 
   /**

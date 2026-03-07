@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import { program } from 'commander';
 import ora from 'ora';
 import { remediate } from './cli';
+import { STEP_DESCRIPTIONS } from './lib/types';
 
 // Get version from package.json
 const packageJsonPath = path.join(__dirname, '..', 'package.json');
@@ -24,6 +25,7 @@ program
   .option('-v, --verbose', 'Enable verbose output', false)
   .option('--export-plan <file>', 'Export remediation plan to file without executing')
   .option('--apply-plan <file>', 'Apply a previously exported remediation plan')
+  .option('--resume <file>', 'Resume remediation from a checkpoint after a previous failure')
   .option('--s3-bucket <bucket>', 'S3 bucket for uploading large templates (auto-detects CDK bootstrap bucket)')
   .action(async (stackName: string, options: {
     region?: string;
@@ -33,14 +35,28 @@ program
     verbose: boolean;
     exportPlan?: string;
     applyPlan?: string;
+    resume?: string;
     s3Bucket?: string;
   }) => {
+    // Mutual exclusivity checks
     if (options.exportPlan && options.applyPlan) {
       console.error(chalk.red('Error: --export-plan and --apply-plan are mutually exclusive'));
       process.exit(1);
     }
+    if (options.resume && options.exportPlan) {
+      console.error(chalk.red('Error: --resume and --export-plan are mutually exclusive'));
+      process.exit(1);
+    }
+    if (options.resume && options.applyPlan) {
+      console.error(chalk.red('Error: --resume and --apply-plan are mutually exclusive'));
+      process.exit(1);
+    }
+    if (options.resume && options.dryRun) {
+      console.error(chalk.red('Error: --resume and --dry-run are mutually exclusive'));
+      process.exit(1);
+    }
 
-    const spinner = ora('Starting drift remediation...').start();
+    const spinner = ora(options.resume ? 'Resuming drift remediation...' : 'Starting drift remediation...').start();
 
     try {
       const result = await remediate(
@@ -53,6 +69,7 @@ program
           verbose: options.verbose,
           exportPlan: options.exportPlan,
           applyPlan: options.applyPlan,
+          resume: options.resume,
           s3Bucket: options.s3Bucket,
         },
         spinner,
@@ -96,8 +113,28 @@ program
         }
       } else {
         spinner.fail(chalk.red('Drift remediation failed'));
-        for (const error of result.errors) {
-          console.error(chalk.red(`  - ${error}`));
+
+        // Enhanced failure display with structured StepError
+        if (result.stepError) {
+          const se = result.stepError;
+          console.error('');
+          console.error(chalk.red(`  Failed at: ${STEP_DESCRIPTIONS[se.step]}`));
+          console.error(chalk.red(`  Error: ${se.message}`));
+          console.error('');
+          console.error(chalk.yellow('  Stack state:'));
+          console.error(chalk.yellow(`    ${se.stackState}`));
+          console.error('');
+          console.error(chalk.bold('  Recovery options:'));
+          for (const line of se.guidance) {
+            // Indent each line of multi-line guidance
+            const indented = line.split('\n').map((l) => `    ${l}`).join('\n');
+            console.error(indented);
+          }
+          console.error('');
+        } else {
+          for (const error of result.errors) {
+            console.error(chalk.red(`  - ${error}`));
+          }
         }
         process.exit(1);
       }
@@ -123,5 +160,6 @@ export * from './lib/eligible-resources';
 export * from './lib/template-transformer';
 export * from './lib/resource-importer';
 export * from './lib/resource-identifier';
-export { promptForDecisions, formatDriftDiff, displayCascadeWarning, displayNonImportableReport } from './lib/interactive';
+export { promptForDecisions, formatDriftDiff, displayBlockedDeletedResources, displayCascadeWarning, displayNonImportableReport, displayPreflightWarnings } from './lib/interactive';
 export { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';
+export { saveCheckpoint, loadCheckpoint, buildStepError } from './lib/recovery';

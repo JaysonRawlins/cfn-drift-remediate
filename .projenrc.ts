@@ -24,7 +24,6 @@ const project = new typescript.TypeScriptProject({
   // NPM Publishing via OIDC trusted publishing (beta dist-tag)
   releaseToNpm: true,
   npmAccess: NpmAccess.PUBLIC,
-  npmDistTag: 'beta',
   npmTrustedPublishing: true,
 
   // GitHub Options
@@ -43,6 +42,7 @@ const project = new typescript.TypeScriptProject({
 
   // Runtime Dependencies
   deps: [
+    '@aws-sdk/client-cloudcontrol',
     '@aws-sdk/client-cloudformation',
     '@aws-sdk/client-s3',
     '@aws-sdk/client-sts',
@@ -106,7 +106,11 @@ new TextFile(project, '.tool-versions', {
 project.eslint?.addIgnorePattern('test/integration/');
 
 // Ignore runtime backup files created by cfn-drift-remediate
-project.gitignore.addPatterns('.cfn-drift-remediate-backup-*');
+
+project.gitignore?.addPatterns(
+  '.cfn-drift-remediate-backup-*',
+  'plan.json',
+);
 project.npmignore?.addPatterns('.cfn-drift-remediate-backup-*');
 
 project.synth();

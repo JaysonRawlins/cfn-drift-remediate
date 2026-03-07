@@ -1,0 +1,30 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: E2E test stack for DELETED drift with cascade dependencies
+
+Resources:
+  TestTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: e2e-cascade-topic
+
+  TestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      Tags:
+        - Key: TopicArn
+          Value: !Ref TestTopic
+
+  TestSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref TestTopic
+      Protocol: sqs
+      Endpoint: !GetAtt TestQueue.Arn
+
+Outputs:
+  TopicArn:
+    Value: !Ref TestTopic
+  QueueUrl:
+    Value: !Ref TestQueue
+  QueueArn:
+    Value: !GetAtt TestQueue.Arn

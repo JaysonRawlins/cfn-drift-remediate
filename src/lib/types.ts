@@ -1,4 +1,50 @@
 /**
+ * Enumeration of remediation steps that mutate the stack (Steps 6-10).
+ * Values match the step numbers in the remediation process.
+ */
+export enum RemediationStep {
+  RETAIN_AND_REMOVE_DELETED = 6,
+  RESOLVE_REFERENCES = 7,
+  REMOVE_MODIFIED = 8,
+  IMPORT_RESOURCES = 9,
+  RESTORE_TEMPLATE = 10,
+}
+
+export const STEP_DESCRIPTIONS: Record<RemediationStep, string> = {
+  [RemediationStep.RETAIN_AND_REMOVE_DELETED]: 'Step 6: Set DeletionPolicy:Retain and remove DELETED resources',
+  [RemediationStep.RESOLVE_REFERENCES]: 'Step 7: Resolve cross-references to drifted resources',
+  [RemediationStep.REMOVE_MODIFIED]: 'Step 8: Remove drifted resources from template',
+  [RemediationStep.IMPORT_RESOURCES]: 'Step 9: Import resources via change set',
+  [RemediationStep.RESTORE_TEMPLATE]: 'Step 10: Restore original template',
+};
+
+export const STEP_STATE_AFTER_FAILURE: Record<RemediationStep, string> = {
+  [RemediationStep.RETAIN_AND_REMOVE_DELETED]: 'Stack resources may have DeletionPolicy:Retain. DELETED resources may or may not be removed.',
+  [RemediationStep.RESOLVE_REFERENCES]: 'All resources have DeletionPolicy:Retain. DELETED resources removed. Temporary resolution Outputs may be present.',
+  [RemediationStep.REMOVE_MODIFIED]: 'All resources have DeletionPolicy:Retain. DELETED resources removed. MODIFIED resources may or may not be removed.',
+  [RemediationStep.IMPORT_RESOURCES]: 'Drifted resources removed from stack but still exist in AWS (Retain). Import may be partially complete.',
+  [RemediationStep.RESTORE_TEMPLATE]: 'Resources imported successfully. Template still has DeletionPolicy:Retain set.',
+};
+
+/**
+ * Structured error from a failed remediation step, including recovery guidance.
+ */
+export interface StepError {
+  step: RemediationStep;
+  message: string;
+  stackState: string;
+  guidance: string[];
+}
+
+/**
+ * Warning about a resource type that may not support CloudControl read operations.
+ */
+export interface PreflightWarning {
+  resourceType: string;
+  reason: string;
+}
+
+/**
  * Represents a drifted CloudFormation resource
  */
 export interface DriftedResource {
@@ -100,6 +146,8 @@ export interface RemediationOptions {
   applyPlan?: string;
   /** S3 bucket for uploading large templates (auto-detects CDK bootstrap bucket if omitted) */
   s3Bucket?: string;
+  /** Path to checkpoint file for resuming a previously failed remediation */
+  resume?: string;
 }
 
 /**
@@ -130,6 +178,8 @@ export interface RemediationResult {
   nonImportableResources: NonImportableResource[];
   /** Error messages if any */
   errors: string[];
+  /** Structured error with recovery guidance when a step fails */
+  stepError?: StepError;
 }
 
 /**
@@ -188,6 +238,28 @@ export interface RecoveryCheckpoint {
   driftedResourceIds: string[];
   /** ISO timestamp when checkpoint was created */
   timestamp: string;
+
+  // Resume fields (v2)
+  /** Checkpoint format version — v2 supports resume */
+  checkpointVersion?: 2;
+  /** Last step that completed successfully */
+  lastCompletedStep?: RemediationStep;
+  /** Template body after Step 6 (Retain + DELETED removal) */
+  retainTemplateBody?: string;
+  /** JSON.stringify([...resolvedValues.entries()]) after Step 7 */
+  resolvedValuesJson?: string;
+  /** Template body after Step 8 (MODIFIED removal) */
+  removalTemplateBody?: string;
+  /** True after Step 9 import completes */
+  importComplete?: boolean;
+  /** Capabilities used for stack operations */
+  capabilities?: string[];
+  /** Serialized InteractiveDecisions for resume */
+  decisionsJson?: string;
+  /** Serialized ResourceToImport[] for resume */
+  resourcesToImportJson?: string;
+  /** File path where this checkpoint is saved */
+  checkpointPath?: string;
 }
 
 /**

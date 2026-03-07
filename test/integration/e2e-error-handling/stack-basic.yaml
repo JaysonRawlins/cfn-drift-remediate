@@ -1,0 +1,19 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: E2E test stack for MODIFIED drift, v2 checkpoints, and resume
+
+Resources:
+  TestBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      Tags:
+        - Key: Environment
+          Value: test
+        - Key: ManagedBy
+          Value: cfn-drift-remediate
+
+  TestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      Tags:
+        - Key: Environment
+          Value: test
