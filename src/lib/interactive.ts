@@ -252,54 +252,52 @@ export function displayNonImportableReport(
 }
 
 /**
- * Display a message about DELETED resources that cannot be safely remediated
- * because their cascade dependencies lack CloudControl read support.
- */
-export function displayBlockedDeletedResources(
-  blockedIds: string[],
-  cascadeRemovals: Array<{ logicalResourceId: string; resourceType: string; dependsOn: string }>,
-  allDriftedResources: DriftedResource[],
-): void {
-  if (blockedIds.length === 0) return;
-
-  console.log(chalk.bold.yellow(
-    `\n${blockedIds.length} DELETED resource(s) cannot be safely remediated and will be skipped:`,
-  ));
-  for (const id of blockedIds) {
-    const resource = allDriftedResources.find((r) => r.logicalResourceId === id);
-    const resourceType = resource?.resourceType ?? 'Unknown';
-    console.log(chalk.yellow(`  - ${id} (${resourceType})`));
-
-    const deps = cascadeRemovals.filter((c) => c.dependsOn === id);
-    for (const dep of deps) {
-      console.log(chalk.dim(`    cascade dep: ${dep.logicalResourceId} (${dep.resourceType}) — lacks CloudControl read support`));
-    }
-  }
-  console.log(chalk.dim(
-    '\nThese resources have cascade dependencies whose properties cannot be read via CloudControl.\n'
-    + 'Skipping them prevents data loss. MODIFIED resources are unaffected and will still be remediated.\n',
-  ));
-  // Future: restrictive CloudFormation service role (--role-arn) that denies resource deletion
-  // could allow DELETED resource remediation without CloudControl
-}
-
-/**
  * Display warnings about resource types that don't support CloudControl read.
- * These resources may have broken references that can't be resolved automatically.
+ * Placeholder values will be used as fallback for broken references.
  */
 export function displayPreflightWarnings(warnings: PreflightWarning[]): void {
   if (warnings.length === 0) return;
 
   console.log(chalk.bold.yellow(
-    `\nWarning: ${warnings.length} resource type(s) may not support CloudControl read operations:`,
+    `\nNote: ${warnings.length} resource type(s) may not support CloudControl read operations:`,
   ));
   for (const w of warnings) {
     console.log(chalk.yellow(`  - ${w.resourceType}: ${w.reason}`));
   }
   console.log(chalk.dim(
-    '\nIf these resources have cross-references (Ref/GetAtt) to removed resources,\n'
-    + 'their broken references cannot be automatically resolved. CloudFormation will\n'
-    + 'fail safely during the update (no resources will be deleted).\n',
+    '\nPlaceholder values will be used for any broken cross-references (Ref/GetAtt).\n'
+    + 'This is safe because these resources are removed from the stack in the next step.\n'
+    + 'The auto-bootstrapped safety role prevents any accidental resource deletion.\n',
+  ));
+}
+
+/**
+ * Display a warning when the stack contains resource types whose service
+ * namespaces are not covered by the safety role's deny list.
+ */
+export function displayUncoveredServiceWarning(uncoveredTypes: Array<{ resourceType: string; iamNamespace: string }>): void {
+  if (uncoveredTypes.length === 0) return;
+
+  // Deduplicate by IAM namespace
+  const byNamespace = new Map<string, string[]>();
+  for (const { resourceType, iamNamespace } of uncoveredTypes) {
+    if (!byNamespace.has(iamNamespace)) {
+      byNamespace.set(iamNamespace, []);
+    }
+    byNamespace.get(iamNamespace)!.push(resourceType);
+  }
+
+  console.log(chalk.bold.yellow(
+    `\nWarning: ${byNamespace.size} service namespace(s) in this stack are not covered by the safety role:`,
+  ));
+  for (const [ns, types] of byNamespace) {
+    console.log(chalk.yellow(`  - ${ns} (${types.join(', ')})`));
+  }
+  console.log(chalk.dim(
+    '\nThese resources are not protected against accidental deletion by the safety role.\n'
+    + 'DeletionPolicy:Retain will be set, but may not be sufficient in cascade scenarios.\n'
+    + 'Please open an issue at https://github.com/JaysonRawlins/cfn-drift-remediate/issues\n'
+    + 'so we can add coverage for this service.\n',
   ));
 }
 

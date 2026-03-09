@@ -1,15 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { Ora } from 'ora';
+import { getOrCreateServiceRole, getCoveredServiceNamespaces, cfTypeToIamNamespace } from './lib/bootstrap';
 import { CfnClientWrapper } from './lib/cfn-client';
 import { isResourceImportable, getAllRequiredCapabilities } from './lib/eligible-resources';
 import {
-  displayBlockedDeletedResources,
   displayCascadeWarning,
   displayNonImportableReport,
   displayPreflightWarnings,
+  displayUncoveredServiceWarning,
   promptForDecisions,
 } from './lib/interactive';
 import { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';
@@ -23,6 +23,7 @@ import {
   parseResolvedOutputs,
   extractResolvedValues,
   resolvePropertyValue,
+  neutralizeBrokenReferences,
   setRetentionOnAllResources,
   transformTemplateForRemoval,
   analyzeCascadeRemovals,
@@ -357,65 +358,27 @@ export async function remediate(
     }
 
     // Pre-flight check: warn about resource types that don't support CloudControl read
-    const preflight = await runPreflightCheck(client, cascadeRemovals, allDriftedResources, logicalIdsToRemove);
+    // (informational only — placeholder values will be used as fallback)
+    const preflightWarnings = await runPreflightCheck(client, cascadeRemovals, allDriftedResources, logicalIdsToRemove);
 
-    // Block DELETED resources whose cascade deps can't be safely read via CloudControl
-    if (preflight.blockedDeletedResourceIds.length > 0) {
+    if (preflightWarnings.length > 0) {
       if (spinner) spinner.stop();
-      displayBlockedDeletedResources(
-        preflight.blockedDeletedResourceIds,
-        cascadeRemovals,
-        allDriftedResources,
-      );
-
-      // Move blocked DELETED resources from remove → skip
-      const blockedSet = new Set(preflight.blockedDeletedResourceIds);
-      const blockedResources = decisions.remove.filter((r) => blockedSet.has(r.logicalResourceId));
-      decisions.remove = decisions.remove.filter((r) => !blockedSet.has(r.logicalResourceId));
-      decisions.skip.push(...blockedResources);
-      for (const r of blockedResources) {
-        result.skippedResources.push(r.logicalResourceId);
-      }
-
-      // Remove their cascade deps from analysis
-      const filteredCascadeRemovals = cascadeRemovals.filter(
-        (c) => !blockedSet.has(c.dependsOn),
-      );
-      cascadeRemovals.length = 0;
-      cascadeRemovals.push(...filteredCascadeRemovals);
-
-      // Rebuild logicalIdsToRemove and allImportable without blocked resources
-      for (const id of preflight.blockedDeletedResourceIds) {
-        logicalIdsToRemove.delete(id);
-      }
-
-      // If nothing remediable remains, return success
-      const remainingActions = decisions.autofix.length + decisions.reimport.length + decisions.remove.length;
-      if (remainingActions === 0 && allImportable.length === 0) {
-        if (spinner) spinner.succeed('No safely remediable resources remain');
-        result.success = true;
-        return result;
-      }
+      displayPreflightWarnings(preflightWarnings);
       if (spinner) spinner.start('Processing...');
     }
 
-    if (preflight.warnings.length > 0 && preflight.blockedDeletedResourceIds.length === 0) {
-      if (spinner) spinner.stop();
-      displayPreflightWarnings(preflight.warnings);
-      if (!options.yes) {
-        const proceed = await confirm({
-          message: 'Continue despite CloudControl warnings?',
-          default: true,
-        });
-        if (!proceed) {
-          if (spinner) spinner.succeed('Aborted by user');
-          result.success = true;
-          result.skippedResources = [...result.skippedResources, ...allImportable.map((r) => r.LogicalResourceId)];
-          return result;
-        }
-      } else if (options.verbose) {
-        console.log(chalk.dim('Continuing despite CloudControl warnings (--yes mode).'));
+    // Check for resource types not covered by the safety role's deny list
+    const coveredNamespaces = getCoveredServiceNamespaces();
+    const uncoveredTypes: Array<{ resourceType: string; iamNamespace: string }> = [];
+    for (const [, resource] of Object.entries(originalTemplate.Resources)) {
+      const iamNs = cfTypeToIamNamespace(resource.Type);
+      if (iamNs && !coveredNamespaces.has(iamNs)) {
+        uncoveredTypes.push({ resourceType: resource.Type, iamNamespace: iamNs });
       }
+    }
+    if (uncoveredTypes.length > 0) {
+      if (spinner) spinner.stop();
+      displayUncoveredServiceWarning(uncoveredTypes);
       if (spinner) spinner.start('Processing...');
     }
 
@@ -495,6 +458,12 @@ export async function remediate(
     if (options.verbose) {
       console.log(`Recovery checkpoint: ${backupPath}`);
     }
+
+    // Auto-bootstrap: ensure restrictive service role exists before mutations
+    if (spinner) spinner.stop();
+    const roleArn = await getOrCreateServiceRole(client, options.yes ?? false, options.verbose ?? false);
+    client.setServiceRoleArn(roleArn);
+    if (spinner) spinner.start('Processing...');
 
     // Execute Steps 6-10 with checkpoint tracking
     await executeMutationSteps(
@@ -581,17 +550,19 @@ async function executeMutationSteps(
         const cascadeDepIds = new Set(cascadeDeps.map((c) => c.logicalResourceId));
 
         if (cascadeDepIds.size > 0) {
-          // Phase 1: Resolve broken refs in cascade deps and set Retain.
+          // Phase 1: Resolve broken refs in cascade deps via CloudControl (with placeholder fallback) and set Retain.
           log(`Phase 1: Resolving properties for ${cascadeDepIds.size} cascade-dependent resources...`);
 
           const cascadeResolvedValues = new Map<string, unknown>();
 
+          // Populate Ref resolved values from DELETED resource physical IDs
           for (const deletedResource of allDriftedResources) {
             if (deletedLogicalIds.has(deletedResource.logicalResourceId) && deletedResource.physicalResourceId) {
               cascadeResolvedValues.set(`Ref:${deletedResource.logicalResourceId}`, deletedResource.physicalResourceId);
             }
           }
 
+          // Try CloudControl for each cascade dep — fall back to placeholders on failure
           for (const cascadeDep of cascadeDeps) {
             const resource = originalTemplate.Resources?.[cascadeDep.logicalResourceId];
             if (!resource?.Properties) continue;
@@ -603,15 +574,14 @@ async function executeMutationSteps(
 
             const actualProps = await client.getResourceProperties(resource.Type, physicalId);
             if (!actualProps) {
-              if (options.verbose) {
-                console.log(`  Warning: Could not read properties for ${cascadeDep.logicalResourceId} via CloudControl`);
-              }
+              log(`  CloudControl unavailable for ${cascadeDep.logicalResourceId} — will use placeholder values`);
               continue;
             }
 
             extractResolvedValues(resource.Properties, actualProps, deletedLogicalIds, cascadeResolvedValues);
           }
 
+          // Also resolve Outputs via stack's current output values
           if (originalTemplate.Outputs && stackInfo.outputs) {
             const actualOutputsMap: Record<string, Record<string, unknown>> = {};
             for (const output of stackInfo.outputs) {
@@ -622,15 +592,22 @@ async function executeMutationSteps(
             extractResolvedValues(originalTemplate.Outputs, actualOutputsMap, deletedLogicalIds, cascadeResolvedValues);
           }
 
+          // Apply resolved values, then neutralize any remaining broken refs with placeholders
           const phase1Template = deepClone(originalTemplate);
           for (const id of cascadeDepIds) {
             const resource = phase1Template.Resources?.[id];
             if (!resource?.Properties) continue;
+            // Pass 1: resolve what CloudControl found
             resource.Properties = resolvePropertyValue(
               resource.Properties,
               deletedLogicalIds,
               cascadeResolvedValues,
               false,
+            ) as Record<string, unknown>;
+            // Pass 2: neutralize any remaining broken refs with placeholders
+            resource.Properties = neutralizeBrokenReferences(
+              resource.Properties,
+              deletedLogicalIds,
             ) as Record<string, unknown>;
             resource.DeletionPolicy = 'Retain';
           }
@@ -641,6 +618,10 @@ async function executeMutationSteps(
               deletedLogicalIds,
               cascadeResolvedValues,
               false,
+            ) as Record<string, unknown>;
+            phase1Template.Outputs = neutralizeBrokenReferences(
+              phase1Template.Outputs,
+              deletedLogicalIds,
             ) as Record<string, unknown>;
           }
 
@@ -949,6 +930,10 @@ async function resumeRemediation(
   };
 
   try {
+    // Auto-bootstrap: ensure restrictive service role exists before mutations
+    const roleArn = await getOrCreateServiceRole(client, options.yes ?? false, options.verbose ?? false);
+    client.setServiceRoleArn(roleArn);
+
     await executeMutationSteps(
       client, options, stackInfo, originalTemplate, originalTemplateBody,
       allDriftedResources, decisions, allImportable, logicalIdsToRemove,
@@ -978,23 +963,16 @@ async function resumeRemediation(
   return result;
 }
 
-interface PreflightResult {
-  warnings: PreflightWarning[];
-  blockedDeletedResourceIds: string[];
-}
-
 /**
- * Run pre-flight checks on cascade dependency resource types using CloudControl DescribeType.
- * Returns warnings for types that don't support CloudControl read operations, and
- * logical IDs of DELETED resources whose cascade deps lack CloudControl read support
- * (these must be skipped to prevent data loss).
+ * Pre-flight check: identify cascade dep types that don't support CloudControl read.
+ * Returns informational warnings — placeholder values will be used as fallback.
  */
 async function runPreflightCheck(
   client: CfnClientWrapper,
   cascadeRemovals: Array<{ logicalResourceId: string; resourceType: string; dependsOn: string }>,
   allDriftedResources: DriftedResource[],
   logicalIdsToRemove: Set<string>,
-): Promise<PreflightResult> {
+): Promise<PreflightWarning[]> {
   // Collect unique resource types from cascade deps of DELETED resources
   const deletedLogicalIds = new Set(
     allDriftedResources
@@ -1002,7 +980,6 @@ async function runPreflightCheck(
       .map((r) => r.logicalResourceId),
   );
 
-  // Map: cascade dep type → whether it's safe (has read handler)
   const cascadeDepTypes = new Set<string>();
   for (const c of cascadeRemovals) {
     if (deletedLogicalIds.has(c.dependsOn)) {
@@ -1010,45 +987,29 @@ async function runPreflightCheck(
     }
   }
 
-  if (cascadeDepTypes.size === 0) return { warnings: [], blockedDeletedResourceIds: [] };
+  if (cascadeDepTypes.size === 0) return [];
 
   const warnings: PreflightWarning[] = [];
-  const unsafeTypes = new Set<string>();
 
   for (const typeName of cascadeDepTypes) {
     const typeInfo = await client.describeResourceType(typeName);
     if (!typeInfo) {
       warnings.push({
         resourceType: typeName,
-        reason: 'Could not describe resource type (may not be registered in CloudFormation registry)',
+        reason: 'Could not describe resource type — placeholder values will be used for broken references',
       });
-      unsafeTypes.add(typeName);
     } else if (typeInfo.provisioningType === 'NON_PROVISIONABLE') {
       warnings.push({
         resourceType: typeName,
-        reason: 'NON_PROVISIONABLE type — CloudControl operations not supported',
+        reason: 'NON_PROVISIONABLE type — placeholder values will be used for broken references',
       });
-      unsafeTypes.add(typeName);
     } else if (!typeInfo.hasReadHandler) {
       warnings.push({
         resourceType: typeName,
-        reason: 'No read handler — actual resource properties cannot be retrieved',
+        reason: 'No read handler — placeholder values will be used for broken references',
       });
-      unsafeTypes.add(typeName);
     }
   }
 
-  // Identify DELETED resources whose cascade deps include unsafe types
-  const blockedDeletedResourceIds: string[] = [];
-  if (unsafeTypes.size > 0) {
-    for (const deletedId of deletedLogicalIds) {
-      const depsOfDeleted = cascadeRemovals.filter((c) => c.dependsOn === deletedId);
-      const hasUnsafeDep = depsOfDeleted.some((c) => unsafeTypes.has(c.resourceType));
-      if (hasUnsafeDep) {
-        blockedDeletedResourceIds.push(deletedId);
-      }
-    }
-  }
-
-  return { warnings, blockedDeletedResourceIds };
+  return warnings;
 }

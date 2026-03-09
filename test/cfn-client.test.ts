@@ -524,6 +524,121 @@ describe('CfnClientWrapper', () => {
     });
   });
 
+  describe('serviceRoleArn', () => {
+    it('passes RoleARN to UpdateStackCommand when serviceRoleArn is set', async () => {
+      const clientWithRole = new CfnClientWrapper({
+        region: 'us-east-1',
+        serviceRoleArn: 'arn:aws:iam::123456789012:role/my-role',
+      });
+      const cfnMock = (clientWithRole as any).client.send;
+
+      cfnMock
+        .mockResolvedValueOnce({}) // UpdateStackCommand
+        .mockResolvedValueOnce({ Stacks: [{ StackStatus: 'UPDATE_COMPLETE' }] }); // waitForStackUpdate
+
+      await clientWithRole.updateStack('my-stack', '{"Resources":{}}');
+
+      const updateCommand = cfnMock.mock.calls[0][0];
+      expect(updateCommand.input.RoleARN).toBe('arn:aws:iam::123456789012:role/my-role');
+    });
+
+    it('omits RoleARN from UpdateStackCommand when serviceRoleArn is not set', async () => {
+      mockSend
+        .mockResolvedValueOnce({}) // UpdateStackCommand
+        .mockResolvedValueOnce({ Stacks: [{ StackStatus: 'UPDATE_COMPLETE' }] }); // waitForStackUpdate
+
+      await client.updateStack('my-stack', '{"Resources":{}}');
+
+      const updateCommand = mockSend.mock.calls[0][0];
+      expect(updateCommand.input.RoleARN).toBeUndefined();
+    });
+
+    it('passes RoleARN to CreateChangeSetCommand when serviceRoleArn is set', async () => {
+      const clientWithRole = new CfnClientWrapper({
+        region: 'us-east-1',
+        serviceRoleArn: 'arn:aws:iam::123456789012:role/my-role',
+      });
+      const cfnMock = (clientWithRole as any).client.send;
+
+      cfnMock
+        .mockResolvedValueOnce({}) // CreateChangeSetCommand
+        .mockResolvedValueOnce({ Status: 'CREATE_COMPLETE' }); // DescribeChangeSetCommand
+
+      await clientWithRole.createImportChangeSet('my-stack', '{"Resources":{}}', []);
+
+      const createCommand = cfnMock.mock.calls[0][0];
+      expect(createCommand.input.RoleARN).toBe('arn:aws:iam::123456789012:role/my-role');
+    });
+  });
+
+  describe('createStack', () => {
+    it('sends CreateStackCommand and waits for completion', async () => {
+      mockSend
+        .mockResolvedValueOnce({}) // CreateStackCommand
+        .mockResolvedValueOnce({ Stacks: [{ StackStatus: 'CREATE_COMPLETE' }] }); // DescribeStacksCommand
+
+      await client.createStack('new-stack', '{"Resources":{}}');
+
+      const createCommand = mockSend.mock.calls[0][0];
+      expect(createCommand.input.StackName).toBe('new-stack');
+      expect(createCommand.input.TemplateBody).toBe('{"Resources":{}}');
+      expect(createCommand.input.Capabilities).toEqual(['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM']);
+    });
+
+    it('does not pass RoleARN (bootstrap uses caller permissions)', async () => {
+      const clientWithRole = new CfnClientWrapper({
+        region: 'us-east-1',
+        serviceRoleArn: 'arn:aws:iam::123456789012:role/my-role',
+      });
+      const cfnMock = (clientWithRole as any).client.send;
+
+      cfnMock
+        .mockResolvedValueOnce({}) // CreateStackCommand
+        .mockResolvedValueOnce({ Stacks: [{ StackStatus: 'CREATE_COMPLETE' }] }); // DescribeStacksCommand
+
+      await clientWithRole.createStack('new-stack', '{"Resources":{}}');
+
+      const createCommand = cfnMock.mock.calls[0][0];
+      expect(createCommand.input.RoleARN).toBeUndefined();
+    });
+
+    it('throws on creation failure', async () => {
+      mockSend
+        .mockResolvedValueOnce({}) // CreateStackCommand
+        .mockResolvedValueOnce({
+          Stacks: [{ StackStatus: 'ROLLBACK_COMPLETE', StackStatusReason: 'IAM permissions error' }],
+        })
+        .mockResolvedValueOnce({ StackEvents: [] }); // getRecentStackEvents
+
+      await expect(client.createStack('bad-stack', '{"Resources":{}}')).rejects.toThrow(
+        /Stack creation failed.*IAM permissions error/,
+      );
+    });
+  });
+
+  describe('setServiceRoleArn', () => {
+    it('updates the role used for subsequent stack operations', async () => {
+      // First call without role
+      mockSend
+        .mockResolvedValueOnce({}) // UpdateStackCommand
+        .mockResolvedValueOnce({ Stacks: [{ StackStatus: 'UPDATE_COMPLETE' }] });
+
+      await client.updateStack('my-stack', '{"Resources":{}}');
+      expect(mockSend.mock.calls[0][0].input.RoleARN).toBeUndefined();
+
+      // Set role
+      client.setServiceRoleArn('arn:aws:iam::123456789012:role/safety-role');
+
+      // Second call with role
+      mockSend
+        .mockResolvedValueOnce({}) // UpdateStackCommand
+        .mockResolvedValueOnce({ Stacks: [{ StackStatus: 'UPDATE_COMPLETE' }] });
+
+      await client.updateStack('my-stack', '{"Resources":{}}');
+      expect(mockSend.mock.calls[2][0].input.RoleARN).toBe('arn:aws:iam::123456789012:role/safety-role');
+    });
+  });
+
   describe('cleanupTemplates', () => {
     it('deletes uploaded S3 objects', async () => {
       const clientWithBucket = new CfnClientWrapper({

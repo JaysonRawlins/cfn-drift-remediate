@@ -160,6 +160,7 @@ export * from './lib/eligible-resources';
 export * from './lib/template-transformer';
 export * from './lib/resource-importer';
 export * from './lib/resource-identifier';
-export { promptForDecisions, formatDriftDiff, displayBlockedDeletedResources, displayCascadeWarning, displayNonImportableReport, displayPreflightWarnings } from './lib/interactive';
+export { promptForDecisions, formatDriftDiff, displayCascadeWarning, displayNonImportableReport, displayPreflightWarnings, displayUncoveredServiceWarning } from './lib/interactive';
 export { buildPlan, serializePlan, loadPlan, planToDecisions } from './lib/plan';
 export { saveCheckpoint, loadCheckpoint, buildStepError } from './lib/recovery';
+export { getOrCreateServiceRole, bootstrapStackName, DENY_DESTRUCTIVE_ACTIONS, getCoveredServiceNamespaces, cfTypeToIamNamespace } from './lib/bootstrap';

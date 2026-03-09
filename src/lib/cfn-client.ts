@@ -11,6 +11,7 @@ import {
   DescribeTypeCommand,
   ListStackResourcesCommand,
   UpdateStackCommand,
+  CreateStackCommand,
   CreateChangeSetCommand,
   DescribeChangeSetCommand,
   ExecuteChangeSetCommand,
@@ -31,6 +32,7 @@ export interface CfnClientOptions {
   region?: string;
   profile?: string;
   s3BucketName?: string;
+  serviceRoleArn?: string;
 }
 
 export interface StackInfo {
@@ -54,11 +56,13 @@ export class CfnClientWrapper {
   private resolvedBucket?: string;
   private uploadedKeys: string[] = [];
   private resourceTypeCache = new Map<string, { provisioningType?: string; hasReadHandler: boolean } | undefined>();
+  private serviceRoleArn?: string;
   public readonly region: string;
 
   constructor(options: CfnClientOptions = {}) {
     this.region = options.region || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-east-1';
     this.s3BucketName = options.s3BucketName;
+    this.serviceRoleArn = options.serviceRoleArn;
 
     const profile = options.profile || process.env.AWS_PROFILE;
     this.credentials = fromNodeProviderChain(profile ? { profile } : undefined);
@@ -67,6 +71,13 @@ export class CfnClientWrapper {
       region: this.region,
       credentials: this.credentials,
     });
+  }
+
+  /**
+   * Set the CloudFormation service role ARN used for stack operations.
+   */
+  setServiceRoleArn(arn: string): void {
+    this.serviceRoleArn = arn;
   }
 
   private getCloudControlClient(): CloudControlClient {
@@ -367,6 +378,7 @@ export class CfnClientWrapper {
             ParameterValue: p.ParameterValue,
           })),
           Capabilities: capabilities as Capability[],
+          RoleARN: this.serviceRoleArn,
         }),
       );
 
@@ -378,6 +390,68 @@ export class CfnClientWrapper {
       }
       throw error;
     }
+  }
+
+  /**
+   * Create a new CloudFormation stack and wait for completion.
+   * Does NOT use the service role — the bootstrap stack is created with the caller's own permissions.
+   */
+  async createStack(
+    stackName: string,
+    templateBody: string,
+    capabilities: string[] = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM'],
+  ): Promise<void> {
+    await this.client.send(
+      new CreateStackCommand({
+        StackName: stackName,
+        TemplateBody: templateBody,
+        Capabilities: capabilities as Capability[],
+      }),
+    );
+
+    await this.waitForStackCreate(stackName);
+  }
+
+  /**
+   * Wait for stack creation to complete.
+   */
+  async waitForStackCreate(stackName: string, maxWaitMinutes: number = 10): Promise<void> {
+    const startTime = new Date();
+    const maxAttempts = maxWaitMinutes * 6;
+    let attempts = 0;
+
+    while (attempts < maxAttempts) {
+      await sleep(10000);
+      attempts++;
+
+      const response = await this.client.send(
+        new DescribeStacksCommand({ StackName: stackName }),
+      );
+
+      const stack = response.Stacks?.[0];
+      if (!stack) {
+        throw new Error(`Stack not found: ${stackName}`);
+      }
+
+      const status = stack.StackStatus;
+
+      if (status === 'CREATE_COMPLETE') {
+        return;
+      }
+
+      if (status === 'ROLLBACK_COMPLETE' || status === 'CREATE_FAILED') {
+        let message = `Stack creation failed: ${stack.StackStatusReason || 'Unknown reason'}`;
+        try {
+          const events = await this.getRecentStackEvents(stackName, startTime);
+          message += this.formatFailedEvents(events);
+        } catch {
+          // Best-effort event tailing
+        }
+        throw new Error(message);
+      }
+    }
+
+    throw new Error(`Timeout waiting for stack creation after ${maxWaitMinutes} minutes`);
   }
 
   /**
@@ -505,6 +579,7 @@ export class CfnClientWrapper {
           ResourceIdentifier: r.ResourceIdentifier,
         })),
         Capabilities: capabilities as Capability[],
+        RoleARN: this.serviceRoleArn,
       }),
     );
 
