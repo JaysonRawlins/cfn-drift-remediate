@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: E2E test stack with Custom::AWS and AWS::CDK::Metadata to verify safety role coverage
+
+Resources:
+  # Normal driftable resource
+  TestBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      Tags:
+        - Key: Environment
+          Value: test
+        - Key: ManagedBy
+          Value: cfn-drift-remediate
+
+  # CDK Metadata (present in all CDK-synthesized stacks)
+  CDKMetadata:
+    Type: AWS::CDK::Metadata
+    Properties:
+      Analytics: v2:deflate64:fake-analytics-data
+
+  # Lambda execution role for the custom resource
+  CustomResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # Lambda function backing the custom resource
+  CustomResourceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CustomResourceRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import cfnresponse
+          def handler(event, context):
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                  'Message': 'Custom resource executed'
+              })
+
+  # Custom::AWS resource (same type CDK AwsCustomResource generates)
+  CustomAWSResource:
+    Type: Custom::AWS
+    Properties:
+      ServiceToken: !GetAtt CustomResourceFunction.Arn
+      Create:
+        action: noop
+
+Outputs:
+  BucketName:
+    Value: !Ref TestBucket

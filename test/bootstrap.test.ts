@@ -23,7 +23,7 @@ jest.mock('@inquirer/prompts', () => ({
 }));
 
 import { confirm } from '@inquirer/prompts';
-import { getOrCreateServiceRole, bootstrapStackName, DENY_DESTRUCTIVE_ACTIONS } from '../src/lib/bootstrap';
+import { getOrCreateServiceRole, bootstrapStackName, DENY_DESTRUCTIVE_ACTIONS, cfTypeToIamNamespace } from '../src/lib/bootstrap';
 import { CfnClientWrapper } from '../src/lib/cfn-client';
 import { ELIGIBLE_IMPORT_RESOURCES } from '../src/lib/eligible-resources';
 
@@ -277,6 +277,33 @@ describe('bootstrap', () => {
       await expect(getOrCreateServiceRole(client, true, false))
         .rejects.toThrow(/no RoleArn output.*bug/);
     });
+  });
+});
+
+describe('cfTypeToIamNamespace', () => {
+  it('maps standard AWS resource types', () => {
+    expect(cfTypeToIamNamespace('AWS::EC2::Instance')).toBe('ec2');
+    expect(cfTypeToIamNamespace('AWS::RDS::DBInstance')).toBe('rds');
+    expect(cfTypeToIamNamespace('AWS::Lambda::Function')).toBe('lambda');
+    expect(cfTypeToIamNamespace('AWS::S3::Bucket')).toBe('s3');
+  });
+
+  it('returns undefined for Custom::AWS (CDK AwsCustomResource)', () => {
+    expect(cfTypeToIamNamespace('Custom::AWS')).toBeUndefined();
+  });
+
+  it('returns undefined for all Custom:: prefixed types', () => {
+    expect(cfTypeToIamNamespace('Custom::MyCustomResource')).toBeUndefined();
+    expect(cfTypeToIamNamespace('Custom::S3BucketNotification')).toBeUndefined();
+    expect(cfTypeToIamNamespace('Custom::CloudFrontInvalidation')).toBeUndefined();
+  });
+
+  it('returns undefined for AWS::CDK::Metadata', () => {
+    expect(cfTypeToIamNamespace('AWS::CDK::Metadata')).toBeUndefined();
+  });
+
+  it('returns undefined for malformed types', () => {
+    expect(cfTypeToIamNamespace('NoColons')).toBeUndefined();
   });
 });
 

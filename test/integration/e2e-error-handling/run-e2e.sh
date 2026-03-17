@@ -10,6 +10,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 CLI="node $PROJECT_ROOT/lib/index.js"
 STACK_BASIC="cfn-e2e-basic-$(date +%s)"
 STACK_CASCADE="cfn-e2e-cascade-$(date +%s)"
+STACK_CUSTOM="cfn-e2e-custom-$(date +%s)"
 
 PASS=0
 FAIL=0
@@ -41,9 +42,15 @@ cleanup() {
   aws cloudformation wait stack-delete-complete --stack-name "$STACK_CASCADE" 2>/dev/null || true
   log "Stack $STACK_CASCADE deleted."
 
+  log "Deleting stack $STACK_CUSTOM..."
+  aws cloudformation delete-stack --stack-name "$STACK_CUSTOM" 2>/dev/null || true
+  aws cloudformation wait stack-delete-complete --stack-name "$STACK_CUSTOM" 2>/dev/null || true
+  log "Stack $STACK_CUSTOM deleted."
+
   # Clean up checkpoint files
   rm -f .cfn-drift-remediate-backup-${STACK_BASIC}-*.json 2>/dev/null || true
   rm -f .cfn-drift-remediate-backup-${STACK_CASCADE}-*.json 2>/dev/null || true
+  rm -f .cfn-drift-remediate-backup-${STACK_CUSTOM}-*.json 2>/dev/null || true
   rm -f /tmp/e2e-v1-checkpoint.json /tmp/e2e-v2-checkpoint.json /tmp/e2e-resume-checkpoint.json /tmp/e2e-resume-step9.json /tmp/e2e-step-error-checkpoint.json 2>/dev/null || true
 
   log "Cleanup complete."
@@ -528,6 +535,68 @@ set -e
 assert_exit_code 0 $EC "9a: Tool handles synced stack gracefully"
 # Output should indicate stack is in sync
 assert_contains "$OUTPUT" "in sync" "9b: Stack reported as in sync"
+
+# ======================================================================
+section "TEST 10: Custom::AWS and AWS::CDK::Metadata coverage"
+# ======================================================================
+log "Deploying $STACK_CUSTOM (with Custom::AWS + AWS::CDK::Metadata)..."
+aws cloudformation create-stack \
+  --stack-name "$STACK_CUSTOM" \
+  --template-body "file://$SCRIPT_DIR/stack-custom-resource.yaml" \
+  --capabilities CAPABILITY_IAM \
+  --on-failure DELETE \
+  2>&1
+aws cloudformation wait stack-create-complete --stack-name "$STACK_CUSTOM"
+pass "10a: Stack $STACK_CUSTOM deployed"
+
+# Get bucket name for drift injection
+CUSTOM_BUCKET=$(aws cloudformation describe-stack-resource \
+  --stack-name "$STACK_CUSTOM" \
+  --logical-resource-id TestBucket \
+  --query 'StackResourceDetail.PhysicalResourceId' --output text)
+
+log "Injecting MODIFIED drift on bucket tags..."
+EXISTING_TAGS=$(aws s3api get-bucket-tagging --bucket "$CUSTOM_BUCKET" --query 'TagSet' --output json 2>/dev/null || echo "[]")
+NEW_TAGS=$(echo "$EXISTING_TAGS" | jq '
+  map(select(.Key != "Environment")) +
+  [{Key: "Environment", Value: "DRIFTED"}]
+')
+aws s3api put-bucket-tagging --bucket "$CUSTOM_BUCKET" --tagging "{\"TagSet\": $NEW_TAGS}"
+
+log "Running dry-run on stack with Custom::AWS + CDK::Metadata..."
+set +e
+OUTPUT=$($CLI "$STACK_CUSTOM" --dry-run --yes 2>&1)
+EC=$?
+set -e
+
+echo "$OUTPUT"
+
+assert_exit_code 0 $EC "10b: Dry-run exits 0"
+assert_not_contains "$OUTPUT" "not covered by the safety role" "10c: No uncovered namespace warning for Custom::AWS/CDK::Metadata"
+assert_contains "$OUTPUT" "TestBucket" "10d: TestBucket drift detected"
+
+log "Running full remediation on Custom::AWS stack..."
+set +e
+OUTPUT=$($CLI "$STACK_CUSTOM" --yes --verbose 2>&1)
+EC=$?
+set -e
+
+echo "$OUTPUT"
+
+assert_exit_code 0 $EC "10e: Full remediation exits 0"
+assert_not_contains "$OUTPUT" "not covered by the safety role" "10f: No uncovered namespace warning during remediation"
+assert_contains "$OUTPUT" "completed successfully" "10g: Remediation completed successfully"
+
+# Verify Custom::AWS and CDK::Metadata resources still exist in stack
+CUSTOM_RES=$(aws cloudformation describe-stack-resource \
+  --stack-name "$STACK_CUSTOM" \
+  --logical-resource-id CustomAWSResource \
+  --query 'StackResourceDetail.ResourceStatus' --output text 2>/dev/null || echo "MISSING")
+if [[ "$CUSTOM_RES" == "CREATE_COMPLETE" || "$CUSTOM_RES" == "UPDATE_COMPLETE" ]]; then
+  pass "10h: Custom::AWS resource still intact after remediation"
+else
+  fail "10h: Custom::AWS resource in unexpected state: $CUSTOM_RES"
+fi
 
 # ======================================================================
 section "RESULTS"

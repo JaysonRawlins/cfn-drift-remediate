@@ -405,10 +405,33 @@ const CF_TO_IAM_NAMESPACE: Record<string, string> = {
 };
 
 /**
+ * CloudFormation resource types that are safe to ignore for safety role coverage.
+ * These either have no real infrastructure impact or are backed by resources
+ * already covered under other namespaces.
+ *
+ * - Custom::AWS — CDK AwsCustomResource, backed by a Lambda function (covered by 'lambda')
+ * - AWS::CDK::Metadata — CDK analytics metadata, no infrastructure impact
+ * - Custom::* — Generic custom resources, backed by Lambda functions (covered by 'lambda')
+ */
+const SAFE_RESOURCE_TYPES = new Set([
+  'AWS::CDK::Metadata',
+]);
+
+const SAFE_RESOURCE_PREFIXES = [
+  'Custom::',
+];
+
+/**
  * Given a CloudFormation resource type (e.g. AWS::EC2::Instance),
  * return the IAM service namespace (e.g. 'ec2'), or undefined if unknown.
+ *
+ * Returns undefined for resource types that are safe to ignore (CDK metadata,
+ * custom resources backed by Lambda), which prevents them from triggering
+ * uncovered namespace warnings.
  */
 export function cfTypeToIamNamespace(resourceType: string): string | undefined {
+  if (SAFE_RESOURCE_TYPES.has(resourceType)) return undefined;
+  if (SAFE_RESOURCE_PREFIXES.some(prefix => resourceType.startsWith(prefix))) return undefined;
   const parts = resourceType.split('::');
   if (parts.length < 2) return undefined;
   const cfNs = parts[1];
