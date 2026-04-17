@@ -231,7 +231,7 @@
       },
       "steps": [
         {
-          "exec": "npx npm-check-updates@18 --upgrade --target=minor --peer --no-deprecated --dep=dev,peer,prod,optional --filter=@types/jest,@types/js-yaml,@types/node,eslint-import-resolver-typescript,eslint-plugin-import,jest,projen,ts-jest,ts-node,typescript,@aws-sdk/client-cloudcontrol,@aws-sdk/client-cloudformation,@aws-sdk/client-s3,@aws-sdk/client-sts,@aws-sdk/credential-providers,@inquirer/prompts,chalk,commander,ora,yaml-cfn"
+          "exec": "npx npm-check-updates@20 --upgrade --target=minor --peer --no-deprecated --dep=dev,peer,prod,optional --filter=@types/jest,@types/js-yaml,@types/node,eslint-import-resolver-typescript,eslint-plugin-import,jest,projen,ts-jest,ts-node,typescript,@aws-sdk/client-cloudcontrol,@aws-sdk/client-cloudformation,@aws-sdk/client-s3,@aws-sdk/client-sts,@aws-sdk/credential-providers,@inquirer/prompts,chalk,commander,ora,yaml-cfn"
         },
         {
           "exec": "yarn install --check-files"
