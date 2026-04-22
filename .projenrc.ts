@@ -146,19 +146,19 @@ npmUpdate.ignore = [
   { 'dependency-name': '*', 'update-types': ['version-update:semver-major'] },
 ];
 
+// github-actions ecosystem is kept enabled for SECURITY ALERTS ONLY.
+// Version-update PRs are disabled (open-pull-requests-limit: 0) because
+// Dependabot would have to edit projen-generated workflow files directly,
+// which trips projen's anti-tamper check (the files get regenerated on
+// synth from .projenrc.ts). Empirically confirmed via PR #19 on this repo.
+// To bump action versions, use project.github.actions.set() in .projenrc.ts
+// or wait for a projen release that bumps its internal defaults.
 dependabot.config.updates.push({
   'package-ecosystem': 'github-actions',
   'directory': '/',
   'schedule': { interval: 'weekly' },
-  'open-pull-requests-limit': 5,
+  'open-pull-requests-limit': 0,
   'labels': ['dependencies', 'github-actions'],
-  'cooldown': {
-    'default-days': 7,
-    'include': ['*'],
-  },
-  'ignore': [
-    { 'dependency-name': '*', 'update-types': ['version-update:semver-major'] },
-  ],
 });
 
 // Security gate on PRs — calls the reusable osv-scanner workflow from
