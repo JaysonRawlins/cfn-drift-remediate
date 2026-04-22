@@ -1,5 +1,5 @@
-import { typescript, TextFile } from 'projen';
-import { GithubCredentials } from 'projen/lib/github';
+import { typescript, TextFile, YamlFile } from 'projen';
+import { Dependabot, DependabotScheduleInterval, GithubCredentials, VersioningStrategy } from 'projen/lib/github';
 import { NpmAccess } from 'projen/lib/javascript';
 
 const minNodeVersion = '20.19.0';
@@ -25,6 +25,15 @@ const project = new typescript.TypeScriptProject({
   releaseToNpm: true,
   npmAccess: NpmAccess.PUBLIC,
   npmTrustedPublishing: true,
+
+  // Dependency upgrades are handled by Dependabot (lockfile-only + cooldown).
+  // projen still owns package.json; major version bumps stay as manual .projenrc.ts edits.
+  depsUpgrade: false,
+
+  // Frozen-lockfile in CI so Dependabot lockfile-only PRs don't trigger cosmetic self-mutation.
+  buildWorkflowOptions: {
+    mutableBuild: false,
+  },
 
   // GitHub Options
   githubOptions: {
@@ -112,5 +121,62 @@ project.gitignore?.addPatterns(
   'plan.json',
 );
 project.npmignore?.addPatterns('.cfn-drift-remediate-backup-*');
+
+// Dependabot — lockfile-only, patch+minor only, cooldown before PRs open.
+// Patches the raw config because projen's Dependabot API doesn't yet expose
+// cooldown, ignore.update-types, or multi-ecosystem entries.
+const dependabot = new Dependabot(project.github!, {
+  scheduleInterval: DependabotScheduleInterval.WEEKLY,
+  versioningStrategy: VersioningStrategy.LOCKFILE_ONLY,
+  labels: ['dependencies'],
+  openPullRequestsLimit: 10,
+});
+
+const npmUpdate = dependabot.config.updates[0];
+npmUpdate.cooldown = {
+  'default-days': 7,
+  'semver-minor-days': 7,
+  'semver-patch-days': 3,
+  'include': ['*'],
+};
+// Replace projen's lazy-resolved ignore with a static array.
+// Keeps the projen ignore (anti-tamper boundary) and blocks major bumps globally.
+npmUpdate.ignore = [
+  { 'dependency-name': 'projen' },
+  { 'dependency-name': '*', 'update-types': ['version-update:semver-major'] },
+];
+
+dependabot.config.updates.push({
+  'package-ecosystem': 'github-actions',
+  'directory': '/',
+  'schedule': { interval: 'weekly' },
+  'open-pull-requests-limit': 5,
+  'labels': ['dependencies', 'github-actions'],
+  'cooldown': {
+    'default-days': 7,
+    'include': ['*'],
+  },
+  'ignore': [
+    { 'dependency-name': '*', 'update-types': ['version-update:semver-major'] },
+  ],
+});
+
+// Security gate on PRs — calls the reusable osv-scanner workflow from
+// JaysonRawlins/.github. Fails on CVSS >= 9.0. Portable alternative to
+// dependency-review-action for repos without Advanced Security.
+new YamlFile(project, '.github/workflows/security.yml', {
+  obj: {
+    name: 'security',
+    on: {
+      pull_request: {},
+      workflow_dispatch: {},
+    },
+    jobs: {
+      security: {
+        uses: 'JaysonRawlins/.github/.github/workflows/security.yml@main',
+      },
+    },
+  },
+});
 
 project.synth();
