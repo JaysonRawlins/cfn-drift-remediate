@@ -123,25 +123,26 @@ project.gitignore?.addPatterns(
 project.npmignore?.addPatterns('.cfn-drift-remediate-backup-*');
 
 // Dependabot — lockfile-only, patch+minor only, cooldown before PRs open.
-// Patches the raw config because projen's Dependabot API doesn't yet expose
-// cooldown, ignore.update-types, or multi-ecosystem entries.
+// cooldown is natively supported as of projen 0.99.52 (PR #4650, 2026-04-10).
+// Still need raw config mutation for:
+//   - ignore.update-types (projen's DependabotIgnore type only has dependencyName + versions)
+//   - github-actions ecosystem (projen's Dependabot class only manages npm)
 const dependabot = new Dependabot(project.github!, {
   scheduleInterval: DependabotScheduleInterval.WEEKLY,
   versioningStrategy: VersioningStrategy.LOCKFILE_ONLY,
   labels: ['dependencies'],
   openPullRequestsLimit: 10,
+  cooldown: {
+    defaultDays: 7,
+    semverMinorDays: 7,
+    semverPatchDays: 3,
+    include: ['*'],
+  },
 });
 
-const npmUpdate = dependabot.config.updates[0];
-npmUpdate.cooldown = {
-  'default-days': 7,
-  'semver-minor-days': 7,
-  'semver-patch-days': 3,
-  'include': ['*'],
-};
-// Replace projen's lazy-resolved ignore with a static array.
-// Keeps the projen ignore (anti-tamper boundary) and blocks major bumps globally.
-npmUpdate.ignore = [
+// Override the rendered ignore to add an update-types rule blocking majors.
+// Keeps the projen ignore (anti-tamper boundary) that projen auto-adds via ignoreProjen.
+dependabot.config.updates[0].ignore = [
   { 'dependency-name': 'projen' },
   { 'dependency-name': '*', 'update-types': ['version-update:semver-major'] },
 ];
