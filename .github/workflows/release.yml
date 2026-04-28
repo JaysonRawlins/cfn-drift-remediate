@@ -29,6 +29,8 @@ jobs:
         run: |-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Install Aikido Safe-Chain (in-flight malware scanner)
+        run: curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh -s -- --ci
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:

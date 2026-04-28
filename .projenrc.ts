@@ -35,6 +35,24 @@ const project = new typescript.TypeScriptProject({
     mutableBuild: false,
   },
 
+  // Aikido Safe-Chain — in-flight malware scanner that proxies all package
+  // manager commands (yarn/npm/pnpm/pip/etc.) through Aikido Intel.
+  // Blocks malicious packages BEFORE they hit disk, BEFORE install scripts run.
+  // Tokenless, free, with built-in 48h cooldown on freshly-published versions.
+  //
+  // workflowBootstrapSteps injects this BEFORE setup-node. The install script
+  // is OS-detection bash (no Node dependency) and adds shims to GITHUB_PATH;
+  // setup-node populates real yarn afterward. Empirically validate ordering
+  // works on first CI run — if shim resolution recurses, switch to a file
+  // override placing this between setup-node and yarn install.
+  workflowBootstrapSteps: [
+    {
+      name: 'Install Aikido Safe-Chain (in-flight malware scanner)',
+      run: 'curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh -s -- --ci',
+    },
+  ],
+
+
   // GitHub Options
   githubOptions: {
     projenCredentials: GithubCredentials.fromApp({
