@@ -50,4 +50,5 @@ junit.xml
 plan.json
 !/.github/dependabot.yml
 !/.github/workflows/security.yml
+!/.github/workflows/dependabot-automerge.yml
 !/.projenrc.ts
