@@ -198,4 +198,55 @@ new YamlFile(project, '.github/workflows/security.yml', {
   },
 });
 
+// Dependabot auto-merge — declares intent only; branch protection's required
+// status checks are what actually gate the merge. The layered defense is:
+//   Aikido Safe-Chain (in-flight) + osv-scanner (known CVE) + build (frozen-lockfile)
+//   + cooldown (release age) + projen anti-tamper (config drift) + ignore-major.
+// Auto-merge only fires when ALL required checks pass, so each layer is a veto.
+//
+// Uses pull_request_target so the workflow gets the elevated GITHUB_TOKEN
+// (Dependabot's pull_request token is read-only). Safety: the workflow only
+// calls dependabot/fetch-metadata + gh pr merge — no untrusted PR-head code
+// execution. The if: github.actor guard prevents non-Dependabot actors from
+// triggering it.
+new YamlFile(project, '.github/workflows/dependabot-automerge.yml', {
+  obj: {
+    name: 'dependabot-automerge',
+    on: {
+      pull_request_target: {
+        types: ['opened', 'synchronize', 'reopened', 'ready_for_review'],
+      },
+    },
+    permissions: {
+      'contents': 'write',
+      'pull-requests': 'write',
+    },
+    jobs: {
+      automerge: {
+        'runs-on': 'ubuntu-latest',
+        'if': "github.actor == 'dependabot[bot]'",
+        'steps': [
+          {
+            name: 'Get Dependabot metadata',
+            id: 'metadata',
+            uses: 'dependabot/fetch-metadata@v2',
+            with: {
+              'github-token': '${{ secrets.GITHUB_TOKEN }}',
+            },
+          },
+          {
+            name: 'Enable auto-merge for safe Dependabot PRs',
+            if: "steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'",
+            run: 'gh pr merge --auto --squash "$PR_URL"',
+            env: {
+              PR_URL: '${{ github.event.pull_request.html_url }}',
+              GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
+            },
+          },
+        ],
+      },
+    },
+  },
+});
+
 project.synth();
