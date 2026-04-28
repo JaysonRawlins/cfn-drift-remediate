@@ -156,6 +156,18 @@ const dependabot = new Dependabot(project.github!, {
     semverPatchDays: 3,
     include: ['*'],
   },
+  // Group peer-coupled package families into single PRs. Without grouping,
+  // Dependabot opens N parallel PRs that fail build because nested peer-deps
+  // (@smithy/core, @typescript-eslint/utils) only resolve cleanly when the
+  // whole family moves together.
+  groups: {
+    'aws-sdk': {
+      patterns: ['@aws-sdk/*', '@smithy/*'],
+    },
+    'typescript-eslint': {
+      patterns: ['@typescript-eslint/*'],
+    },
+  },
 });
 
 // Override the rendered ignore to add an update-types rule blocking majors.

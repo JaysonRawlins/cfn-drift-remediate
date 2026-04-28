@@ -14,6 +14,14 @@ updates:
           - version-update:semver-major
     labels:
       - dependencies
+    groups:
+      aws-sdk:
+        patterns:
+          - "@aws-sdk/*"
+          - "@smithy/*"
+      typescript-eslint:
+        patterns:
+          - "@typescript-eslint/*"
     open-pull-requests-limit: 10
     cooldown:
       default-days: 7
