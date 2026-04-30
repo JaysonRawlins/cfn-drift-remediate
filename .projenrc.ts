@@ -38,17 +38,26 @@ const project = new typescript.TypeScriptProject({
   // Aikido Safe-Chain — in-flight malware scanner that proxies all package
   // manager commands (yarn/npm/pnpm/pip/etc.) through Aikido Intel.
   // Blocks malicious packages BEFORE they hit disk, BEFORE install scripts run.
-  // Tokenless, free, with built-in 48h cooldown on freshly-published versions.
+  // Tokenless, free.
+  //
+  // SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS=168 raises the proxy-level cooldown
+  // from the 48h default to 7 days. Critically, this applies to ALL packages
+  // fetched (direct AND transitive), which closes the dependabot-core#14683
+  // gap where Dependabot's manifest-level cooldown does not see transitives.
+  // Empirically validated 2026-04-28 on PR #25: a transitive @typescript-eslint
+  // /types@8.59.1 published <48h prior was blocked here while passing
+  // Dependabot's 7-day patch cooldown on the direct dep.
   //
   // workflowBootstrapSteps injects this BEFORE setup-node. The install script
-  // is OS-detection bash (no Node dependency) and adds shims to GITHUB_PATH;
-  // setup-node populates real yarn afterward. Empirically validate ordering
-  // works on first CI run — if shim resolution recurses, switch to a file
-  // override placing this between setup-node and yarn install.
+  // is OS-detection bash (no Node dependency); setup-node populates real yarn
+  // afterward. Env var written via $GITHUB_ENV so subsequent install steps see it.
   workflowBootstrapSteps: [
     {
-      name: 'Install Aikido Safe-Chain (in-flight malware scanner)',
-      run: 'curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh -s -- --ci',
+      name: 'Install Aikido Safe-Chain (in-flight malware scanner, 7d minimum age)',
+      run: [
+        'echo "SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS=168" >> $GITHUB_ENV',
+        'curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh -s -- --ci',
+      ].join('\n'),
     },
   ],
 
@@ -155,6 +164,18 @@ const dependabot = new Dependabot(project.github!, {
     semverMinorDays: 7,
     semverPatchDays: 3,
     include: ['*'],
+  },
+  // Group peer-coupled package families into single PRs. Without grouping,
+  // Dependabot opens N parallel PRs that fail build because nested peer-deps
+  // (@smithy/core, @typescript-eslint/utils) only resolve cleanly when the
+  // whole family moves together.
+  groups: {
+    'aws-sdk': {
+      patterns: ['@aws-sdk/*', '@smithy/*'],
+    },
+    'typescript-eslint': {
+      patterns: ['@typescript-eslint/*'],
+    },
   },
 });
 
