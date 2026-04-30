@@ -51,4 +51,5 @@ plan.json
 !/.github/dependabot.yml
 !/.github/workflows/security.yml
 !/.github/workflows/dependabot-automerge.yml
+!/.github/workflows/dependabot-rebase-stuck.yml
 !/.projenrc.ts

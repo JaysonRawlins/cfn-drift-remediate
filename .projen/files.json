@@ -6,6 +6,7 @@
     ".github/pull_request_template.md",
     ".github/workflows/build.yml",
     ".github/workflows/dependabot-automerge.yml",
+    ".github/workflows/dependabot-rebase-stuck.yml",
     ".github/workflows/pull-request-lint.yml",
     ".github/workflows/release.yml",
     ".github/workflows/security.yml",
