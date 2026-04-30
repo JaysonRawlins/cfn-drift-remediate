@@ -270,4 +270,65 @@ new YamlFile(project, '.github/workflows/dependabot-automerge.yml', {
   },
 });
 
+// Scheduled "scoop-up" for stuck Dependabot PRs. Pattern: a Dependabot PR's
+// build fails because Aikido Safe-Chain blocked a transitive that's still
+// inside its 7-day minimum-age window. Auto-merge intent is registered, but
+// since the required `build` check is in FAILURE state, GitHub never retries
+// on its own. The PR sits stuck even after Aikido's timer clears.
+//
+// This workflow runs daily and comments `@dependabot rebase` on any open
+// Dependabot PR with a failed `build` check. Rebase forces a fresh SHA so
+// all checks re-run, and also brings the PR up-to-date with main (which
+// strict branch protection requires anyway). Idempotent: if there's
+// genuinely no rebase to do, Dependabot is a no-op.
+//
+// V2 candidate: parse build log for "Safe-chain: blocked" before rebasing,
+// to avoid looping on PRs with genuine breakage.
+new YamlFile(project, '.github/workflows/dependabot-rebase-stuck.yml', {
+  obj: {
+    name: 'dependabot-rebase-stuck',
+    on: {
+      schedule: [
+        { cron: '0 9 * * *' },
+      ],
+      workflow_dispatch: {},
+    },
+    permissions: {
+      'pull-requests': 'write',
+    },
+    jobs: {
+      rebase: {
+        'runs-on': 'ubuntu-latest',
+        'steps': [
+          {
+            name: 'Comment @dependabot rebase on stuck Dependabot PRs',
+            env: {
+              GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
+              REPO: '${{ github.repository }}',
+            },
+            run: [
+              'set -euo pipefail',
+              'stuck=$(gh pr list --repo "$REPO" \\',
+              '  --author "app/dependabot" \\',
+              '  --state open \\',
+              '  --json number,statusCheckRollup \\',
+              '  --jq \'.[] | select([.statusCheckRollup[] | select(.name == "build")] | any(.conclusion == "FAILURE")) | .number\')',
+              '',
+              'if [ -z "$stuck" ]; then',
+              '  echo "No stuck Dependabot PRs."',
+              '  exit 0',
+              'fi',
+              '',
+              'for pr in $stuck; do',
+              '  echo "Rebasing PR #$pr (build failed; likely Aikido cooldown — refreshing)"',
+              '  gh pr comment "$pr" --repo "$REPO" --body "@dependabot rebase"',
+              'done',
+            ].join('\n'),
+          },
+        ],
+      },
+    },
+  },
+});
+
 project.synth();
