@@ -276,14 +276,15 @@ new YamlFile(project, '.github/workflows/dependabot-automerge.yml', {
 // since the required `build` check is in FAILURE state, GitHub never retries
 // on its own. The PR sits stuck even after Aikido's timer clears.
 //
-// This workflow runs daily and comments `@dependabot rebase` on any open
-// Dependabot PR with a failed `build` check. Rebase forces a fresh SHA so
-// all checks re-run, and also brings the PR up-to-date with main (which
-// strict branch protection requires anyway). Idempotent: if there's
-// genuinely no rebase to do, Dependabot is a no-op.
+// This workflow runs daily, finds Dependabot PRs with a failed `build`,
+// inspects the failure log, and rebases ONLY when the cause is Aikido's
+// "minimum package age" check (recoverable). Other failure modes — real
+// breakage, malware blocks, unrecognized errors — are explicitly left
+// alone so they remain visible to humans for review.
 //
-// V2 candidate: parse build log for "Safe-chain: blocked" before rebasing,
-// to avoid looping on PRs with genuine breakage.
+// Recovery loop on Aikido cooldown: rebase -> Dependabot pushes fresh SHA
+// -> build re-runs -> if Aikido timer cleared the build passes and
+// auto-merge fires; otherwise next day's run tries again.
 new YamlFile(project, '.github/workflows/dependabot-rebase-stuck.yml', {
   obj: {
     name: 'dependabot-rebase-stuck',
@@ -295,19 +296,21 @@ new YamlFile(project, '.github/workflows/dependabot-rebase-stuck.yml', {
     },
     permissions: {
       'pull-requests': 'write',
+      'actions': 'read',
     },
     jobs: {
       rebase: {
         'runs-on': 'ubuntu-latest',
         'steps': [
           {
-            name: 'Comment @dependabot rebase on stuck Dependabot PRs',
+            name: 'Rebase Dependabot PRs blocked by Aikido cooldown',
             env: {
               GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
               REPO: '${{ github.repository }}',
             },
             run: [
               'set -euo pipefail',
+              '',
               'stuck=$(gh pr list --repo "$REPO" \\',
               '  --author "app/dependabot" \\',
               '  --state open \\',
@@ -320,8 +323,25 @@ new YamlFile(project, '.github/workflows/dependabot-rebase-stuck.yml', {
               'fi',
               '',
               'for pr in $stuck; do',
-              '  echo "Rebasing PR #$pr (build failed; likely Aikido cooldown — refreshing)"',
-              '  gh pr comment "$pr" --repo "$REPO" --body "@dependabot rebase"',
+              '  run_id=$(gh pr view "$pr" --repo "$REPO" --json statusCheckRollup \\',
+              '    --jq \'.statusCheckRollup[] | select(.name == "build") | .detailsUrl\' \\',
+              '    | grep -oE "/runs/[0-9]+" | head -1 | cut -d/ -f3)',
+              '',
+              '  if [ -z "$run_id" ]; then',
+              '    echo "PR #$pr: no build run id, skipping"',
+              '    continue',
+              '  fi',
+              '',
+              '  log=$(gh run view "$run_id" --repo "$REPO" --log-failed 2>&1 || true)',
+              '',
+              '  if echo "$log" | grep -q "minimum package age"; then',
+              '    echo "PR #$pr: Aikido cooldown block — rebasing"',
+              '    gh pr comment "$pr" --repo "$REPO" --body "@dependabot rebase"',
+              '  elif echo "$log" | grep -q "Safe-chain: blocked"; then',
+              '    echo "PR #$pr: Aikido blocked (non-age, possibly malware) — leaving for human review"',
+              '  else',
+              '    echo "PR #$pr: build failed for unrecognized reason — leaving for human review"',
+              '  fi',
               'done',
             ].join('\n'),
           },
