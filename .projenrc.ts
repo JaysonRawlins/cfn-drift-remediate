@@ -270,40 +270,48 @@ new YamlFile(project, '.github/workflows/dependabot-automerge.yml', {
   },
 });
 
-// Scheduled "scoop-up" for stuck Dependabot PRs. Pattern: a Dependabot PR's
+// Scheduled "unblocker" for stuck Dependabot PRs. Pattern: a Dependabot PR's
 // build fails because Aikido Safe-Chain blocked a transitive that's still
-// inside its 7-day minimum-age window. Auto-merge intent is registered, but
-// since the required `build` check is in FAILURE state, GitHub never retries
-// on its own. The PR sits stuck even after Aikido's timer clears.
+// inside its minimum-age window. Auto-merge intent is registered, but since
+// the required `build` check is in FAILURE state, GitHub never retries on
+// its own. The PR sits stuck even after Aikido's timer clears.
 //
-// This workflow runs daily, finds Dependabot PRs with a failed `build`,
-// inspects the failure log, and rebases ONLY when the cause is Aikido's
-// "minimum package age" check (recoverable). Other failure modes — real
-// breakage, malware blocks, unrecognized errors — are explicitly left
-// alone so they remain visible to humans for review.
+// This workflow runs WEEKLY (Monday 09:00 UTC), finds Dependabot PRs with a
+// failed `build`, inspects the failure log, and re-runs the failed build
+// (NOT rebase) ONLY when the cause is Aikido's "minimum package age" check.
+// Other failure modes — real breakage, malware blocks, unrecognized errors
+// — are explicitly left alone so they remain visible for human review.
 //
-// Recovery loop on Aikido cooldown: rebase -> Dependabot pushes fresh SHA
-// -> build re-runs -> if Aikido timer cleared the build passes and
-// auto-merge fires; otherwise next day's run tries again.
+// Why rerun-not-rebase: each rebase forces Dependabot to recompute the
+// lockfile against current registry state, which pulls in newer caret-
+// satisfying versions that themselves trip the cooldown — chasing a
+// moving target. Rerun preserves the lockfile's exact version pins; we
+// just re-ask Aikido whether the existing lockfile entries have aged out.
+//
+// Why weekly: Aikido cooldown is 7d. A daily scoop creates more
+// rebase/recompute opportunities than the cooldown window can absorb;
+// weekly aligns the scoop cadence with the cooldown window. For deeply
+// stuck PRs where main has moved enough to require strict-up-to-date,
+// GitHub's auto-merge with allow_update_branch handles the merge itself.
 new YamlFile(project, '.github/workflows/dependabot-rebase-stuck.yml', {
   obj: {
-    name: 'dependabot-rebase-stuck',
+    name: 'dependabot-unblocker',
     on: {
       schedule: [
-        { cron: '0 9 * * *' },
+        { cron: '0 9 * * 1' },
       ],
       workflow_dispatch: {},
     },
     permissions: {
-      'pull-requests': 'write',
-      'actions': 'read',
+      'pull-requests': 'read',
+      'actions': 'write',
     },
     jobs: {
-      rebase: {
+      unblock: {
         'runs-on': 'ubuntu-latest',
         'steps': [
           {
-            name: 'Rebase Dependabot PRs blocked by Aikido cooldown',
+            name: 'Rerun failed build on Aikido-cooldown-blocked Dependabot PRs',
             env: {
               GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
               REPO: '${{ github.repository }}',
@@ -335,8 +343,8 @@ new YamlFile(project, '.github/workflows/dependabot-rebase-stuck.yml', {
               '  log=$(gh run view "$run_id" --repo "$REPO" --log-failed 2>&1 || true)',
               '',
               '  if echo "$log" | grep -q "minimum package age"; then',
-              '    echo "PR #$pr: Aikido cooldown block — rebasing"',
-              '    gh pr comment "$pr" --repo "$REPO" --body "@dependabot rebase"',
+              '    echo "PR #$pr: Aikido cooldown block — rerunning failed build (preserves lockfile)"',
+              '    gh run rerun "$run_id" --repo "$REPO" --failed',
               '  elif echo "$log" | grep -q "Safe-chain: blocked"; then',
               '    echo "PR #$pr: Aikido blocked (non-age, possibly malware) — leaving for human review"',
               '  else',
