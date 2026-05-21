@@ -134,6 +134,18 @@ releaseWorkflow.file!.addOverride('jobs.release_npm.steps.0.with.node-version', 
 // Set registry-url so setup-node configures .npmrc for OIDC token exchange
 releaseWorkflow.file!.addOverride('jobs.release_npm.steps.0.with.registry-url', 'https://registry.npmjs.org');
 
+// SHA-pin third-party actions used in pull_request_target contexts. A tag
+// reference (@v6) can be force-pushed if the upstream repo is compromised,
+// and the workflow would inherit elevated GITHUB_TOKEN scoped to PRs. SHA
+// pinning makes that swap visible in a diff. First-party actions/* and
+// github/* are left as version tags (lower-risk; GitHub-owned).
+const prLintWorkflow = project.github!.tryFindWorkflow('pull-request-lint')!;
+// amannn/action-semantic-pull-request v6.1.1
+prLintWorkflow.file!.addOverride(
+  'jobs.validate.steps.0.uses',
+  'amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50',
+);
+
 // .tool-versions file for asdf
 new TextFile(project, '.tool-versions', {
   lines: [
@@ -255,7 +267,8 @@ new YamlFile(project, '.github/workflows/dependabot-automerge.yml', {
           {
             name: 'Get Dependabot metadata',
             id: 'metadata',
-            uses: 'dependabot/fetch-metadata@v2',
+            // SHA-pinned (v2.5.0). See the prLintWorkflow override above for rationale.
+            uses: 'dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a',
             with: {
               'github-token': '${{ secrets.GITHUB_TOKEN }}',
             },
