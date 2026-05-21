@@ -19,10 +19,10 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           repository: ${{ github.event.pull_request.head.repo.full_name }}
-      - name: Install Aikido Safe-Chain (in-flight malware scanner, 7d minimum age)
+      - name: Install Aikido Safe-Chain 1.5.3 (in-flight malware scanner, 7d minimum age)
         run: |-
           echo "SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS=168" >> $GITHUB_ENV
-          curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh -s -- --ci
+          curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh | sh -s -- --ci
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
