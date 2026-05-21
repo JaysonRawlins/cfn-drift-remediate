@@ -218,6 +218,67 @@ dependabot.config.updates.push({
   'labels': ['dependencies', 'github-actions'],
 });
 
+// Semgrep SAST — replaces the prior hand-written CodeQL workflow. Reasons:
+//   1. Same cadence as the rest of the JaysonRawlins/* projen suite (see
+//      claude-gavel for the original pattern).
+//   2. CodeQL requires GitHub Advanced Security for private repos and offers
+//      a narrower JS/TS ruleset than Semgrep's curated packs.
+//   3. Semgrep runs in a container we pin by image digest — bytes-level
+//      verification beats CodeQL's floating @v3 tag.
+//
+// SARIF uploaded to the Security/code-scanning tab via codeql-action/upload-sarif
+// (SHA-pinned to v3.35.5). Scan failures don't fail the PR (|| true) so noisy
+// rule packs don't block merges; the Security tab is the system of record.
+new YamlFile(project, '.github/workflows/semgrep.yml', {
+  obj: {
+    name: 'Semgrep',
+    on: {
+      push: { branches: ['main'] },
+      pull_request: { branches: ['main'] },
+    },
+    permissions: {
+      'contents': 'read',
+      'security-events': 'write',
+    },
+    jobs: {
+      scan: {
+        name: 'Scan',
+        'runs-on': 'ubuntu-latest',
+        container: {
+          // semgrep/semgrep:latest (OCI image index digest, multi-arch).
+          // Bumping is a deliberate .projenrc.ts edit.
+          image: 'semgrep/semgrep@sha256:9349edbadf90c3f3c0c3f55867625354e89680e6fa10d9034042af52fdb0e0d0',
+        },
+        steps: [
+          { uses: 'actions/checkout@v4' },
+          {
+            name: 'Run Semgrep',
+            run: [
+              'semgrep scan \\',
+              '  --config=p/security-audit \\',
+              '  --config=p/typescript \\',
+              '  --config=p/javascript \\',
+              '  --config=p/nodejs \\',
+              '  --sarif --output=semgrep.sarif \\',
+              '  || true',
+            ].join('\n'),
+          },
+          {
+            name: 'Upload SARIF',
+            if: "always() && hashFiles('semgrep.sarif') != ''",
+            'continue-on-error': true,
+            // github/codeql-action/upload-sarif v3.35.5 SHA-pinned.
+            uses: 'github/codeql-action/upload-sarif@f411752efdf656cb71aa17b755b22c890960da1d',
+            with: {
+              sarif_file: 'semgrep.sarif',
+            },
+          },
+        ],
+      },
+    },
+  },
+});
+
 // Security gate on PRs — calls the reusable osv-scanner workflow from
 // JaysonRawlins/.github. Fails on CVSS >= 9.0. Portable alternative to
 // dependency-review-action for repos without Advanced Security.
