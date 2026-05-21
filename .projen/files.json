@@ -10,6 +10,7 @@
     ".github/workflows/pull-request-lint.yml",
     ".github/workflows/release.yml",
     ".github/workflows/security.yml",
+    ".github/workflows/semgrep.yml",
     ".gitignore",
     ".npmignore",
     ".projen/deps.json",

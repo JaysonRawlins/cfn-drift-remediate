@@ -49,6 +49,7 @@ junit.xml
 .cfn-drift-remediate-backup-*
 plan.json
 !/.github/dependabot.yml
+!/.github/workflows/semgrep.yml
 !/.github/workflows/security.yml
 !/.github/workflows/dependabot-automerge.yml
 !/.github/workflows/dependabot-rebase-stuck.yml
