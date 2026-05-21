@@ -242,14 +242,14 @@ new YamlFile(project, '.github/workflows/semgrep.yml', {
     },
     jobs: {
       scan: {
-        name: 'Scan',
+        'name': 'Scan',
         'runs-on': 'ubuntu-latest',
-        container: {
+        'container': {
           // semgrep/semgrep:latest (OCI image index digest, multi-arch).
           // Bumping is a deliberate .projenrc.ts edit.
           image: 'semgrep/semgrep@sha256:9349edbadf90c3f3c0c3f55867625354e89680e6fa10d9034042af52fdb0e0d0',
         },
-        steps: [
+        'steps': [
           { uses: 'actions/checkout@v4' },
           {
             name: 'Run Semgrep',
@@ -264,12 +264,12 @@ new YamlFile(project, '.github/workflows/semgrep.yml', {
             ].join('\n'),
           },
           {
-            name: 'Upload SARIF',
-            if: "always() && hashFiles('semgrep.sarif') != ''",
+            'name': 'Upload SARIF',
+            'if': "always() && hashFiles('semgrep.sarif') != ''",
             'continue-on-error': true,
             // github/codeql-action/upload-sarif v3.35.5 SHA-pinned.
-            uses: 'github/codeql-action/upload-sarif@f411752efdf656cb71aa17b755b22c890960da1d',
-            with: {
+            'uses': 'github/codeql-action/upload-sarif@f411752efdf656cb71aa17b755b22c890960da1d',
+            'with': {
               sarif_file: 'semgrep.sarif',
             },
           },
