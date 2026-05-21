@@ -51,12 +51,17 @@ const project = new typescript.TypeScriptProject({
   // workflowBootstrapSteps injects this BEFORE setup-node. The install script
   // is OS-detection bash (no Node dependency); setup-node populates real yarn
   // afterward. Env var written via $GITHUB_ENV so subsequent install steps see it.
+  //
+  // Pinned to 1.5.3 (published 2026-05-12) — `releases/latest` would let
+  // an AikidoSec compromise (or accidental release) trigger an unreviewed
+  // rollout into every build. Bump via .projenrc.ts edit after reviewing
+  // the upstream changelog.
   workflowBootstrapSteps: [
     {
-      name: 'Install Aikido Safe-Chain (in-flight malware scanner, 7d minimum age)',
+      name: 'Install Aikido Safe-Chain 1.5.3 (in-flight malware scanner, 7d minimum age)',
       run: [
         'echo "SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS=168" >> $GITHUB_ENV',
-        'curl -fsSL https://github.com/AikidoSec/safe-chain/releases/latest/download/install-safe-chain.sh | sh -s -- --ci',
+        'curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh | sh -s -- --ci',
       ].join('\n'),
     },
   ],
