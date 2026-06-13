@@ -21,6 +21,12 @@ const CFN_PSEUDO_REFS = new Set([
  */
 const SUB_VARIABLE_PATTERN = /\$\{([^}]+)\}/g;
 
+const NUMERIC_GETATT_ATTRIBUTE = /(^|\.)Port$/i;
+
+function neutralizedRefValue(attributeName: string | undefined, placeholder: string): unknown {
+  return attributeName && NUMERIC_GETATT_ATTRIBUTE.test(attributeName) ? 0 : placeholder;
+}
+
 /**
  * Placeholder template used when all resources are removed
  */
@@ -364,6 +370,37 @@ export function setRetentionOnAllResources(template: CloudFormationTemplate): Cl
   return result;
 }
 
+const NUMERIC_PORT_PROPERTY = /^(From|To)?Port$/;
+
+/** Coerce integer-valued strings under port-like properties to numbers; modern CloudFormation handlers reject string ports (e.g. a resolved RDS Endpoint.Port string in FromPort). */
+export function coerceNumericPortProperties(template: CloudFormationTemplate): CloudFormationTemplate {
+  const result = deepClone(template);
+  coerceNumericPortsInValue(result.Resources);
+  return result;
+}
+
+function coerceNumericPortsInValue(value: unknown): void {
+  if (value === null || typeof value !== 'object') {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      coerceNumericPortsInValue(item);
+    }
+    return;
+  }
+
+  const obj = value as Record<string, unknown>;
+  for (const [key, val] of Object.entries(obj)) {
+    if (NUMERIC_PORT_PROPERTY.test(key) && typeof val === 'string' && /^-?\d+$/.test(val)) {
+      obj[key] = Number(val);
+    } else {
+      coerceNumericPortsInValue(val);
+    }
+  }
+}
+
 /**
  * Check if a value contains unresolved Ref/GetAtt/Fn::Sub references to specified logical IDs.
  * Used to detect broken references after resource removal.
@@ -450,10 +487,10 @@ export function neutralizeBrokenReferences(
   if ('Fn::GetAtt' in obj) {
     const getAtt = obj['Fn::GetAtt'];
     if (Array.isArray(getAtt) && getAtt.length >= 1 && removedLogicalIds.has(getAtt[0] as string)) {
-      return placeholder;
+      return neutralizedRefValue(getAtt[1] as string | undefined, placeholder);
     }
     if (typeof getAtt === 'string' && removedLogicalIds.has(getAtt.split('.')[0])) {
-      return placeholder;
+      return neutralizedRefValue(getAtt.split('.').slice(1).join('.'), placeholder);
     }
     return obj;
   }
