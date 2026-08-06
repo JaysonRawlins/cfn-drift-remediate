@@ -6,6 +6,8 @@ import {
   parseTemplate,
   stringifyTemplate,
   analyzeCascadeRemovals,
+  neutralizeBrokenReferences,
+  coerceNumericPortProperties,
 } from '../src/lib/template-transformer';
 import { CloudFormationTemplate } from '../src/lib/types';
 
@@ -584,5 +586,58 @@ describe('two-phase DELETED resource removal', () => {
     const result = transformTemplateForRemoval(retainTemplate, new Set(['DB']), new Map());
     expect(Object.keys(result.template.Resources)).not.toContain('SGIngress');
     expect(Object.keys(result.template.Resources)).not.toContain('Secret');
+  });
+});
+
+describe('numeric port neutralization and coercion', () => {
+  it('neutralizes a GetAtt to a removed Port attribute as a number, not the string placeholder', () => {
+    const removed = new Set(['DB']);
+    const arrayForm = neutralizeBrokenReferences(
+      { FromPort: { 'Fn::GetAtt': ['DB', 'Endpoint.Port'] } },
+      removed,
+    ) as Record<string, unknown>;
+    expect(arrayForm.FromPort).toBe(0);
+
+    const stringForm = neutralizeBrokenReferences(
+      { ToPort: { 'Fn::GetAtt': 'DB.Endpoint.Port' } },
+      removed,
+    ) as Record<string, unknown>;
+    expect(stringForm.ToPort).toBe(0);
+  });
+
+  it('keeps the string placeholder for non-numeric attributes', () => {
+    const result = neutralizeBrokenReferences(
+      { TargetId: { 'Fn::GetAtt': ['DB', 'Endpoint.Address'] } },
+      new Set(['DB']),
+    ) as Record<string, unknown>;
+    expect(result.TargetId).toBe('PLACEHOLDER');
+  });
+
+  it('coerces integer-valued string ports to numbers across the template', () => {
+    const template: CloudFormationTemplate = {
+      Resources: {
+        SGIngress: {
+          Type: 'AWS::EC2::SecurityGroupIngress',
+          Properties: { GroupId: 'sg-1', FromPort: '5432', ToPort: '5432', IpProtocol: 'tcp' },
+        },
+      },
+    };
+    const coerced = coerceNumericPortProperties(template);
+    expect(coerced.Resources.SGIngress.Properties!.FromPort).toBe(5432);
+    expect(coerced.Resources.SGIngress.Properties!.ToPort).toBe(5432);
+    expect(coerced.Resources.SGIngress.Properties!.IpProtocol).toBe('tcp');
+  });
+
+  it('leaves intrinsic-function port values untouched', () => {
+    const template: CloudFormationTemplate = {
+      Resources: {
+        SGIngress: {
+          Type: 'AWS::EC2::SecurityGroupIngress',
+          Properties: { FromPort: { Ref: 'PortParam' } },
+        },
+      },
+    };
+    const coerced = coerceNumericPortProperties(template);
+    expect(coerced.Resources.SGIngress.Properties!.FromPort).toEqual({ Ref: 'PortParam' });
   });
 });

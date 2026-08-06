@@ -27,6 +27,7 @@ import {
   setRetentionOnAllResources,
   transformTemplateForRemoval,
   analyzeCascadeRemovals,
+  coerceNumericPortProperties,
 } from './lib/template-transformer';
 import {
   RemediationOptions,
@@ -627,7 +628,7 @@ async function executeMutationSteps(
 
           await client.updateStack(
             stackInfo.stackId,
-            stringifyTemplate(phase1Template),
+            stringifyTemplate(coerceNumericPortProperties(phase1Template)),
             phase1Template.Parameters ? stackInfo.parameters : undefined,
             capabilities,
           );
@@ -641,6 +642,7 @@ async function executeMutationSteps(
         retainTemplate = template;
       }
 
+      retainTemplate = coerceNumericPortProperties(retainTemplate!);
       const retainedCount = Object.keys(retainTemplate!.Resources || {}).length;
       log(`DeletionPolicy: Retain set on ${retainedCount} resources. Proceeding...`);
 
