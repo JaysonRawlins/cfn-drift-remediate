@@ -20,6 +20,8 @@ import {
   stringifyTemplate,
   collectReferences,
   addResolutionOutputs,
+  buildRestoreTemplate,
+  detachFromRemovedResources,
   parseResolvedOutputs,
   extractResolvedValues,
   resolvePropertyValue,
@@ -34,6 +36,7 @@ import {
   RecoveryCheckpoint,
   CloudFormationTemplate,
   DriftedResource,
+  ImportTarget,
   InteractiveDecisions,
   PreflightWarning,
   RemediationStep,
@@ -45,6 +48,19 @@ import { deepClone } from './lib/utils';
 
 const DEFAULT_CAPABILITIES = ['CAPABILITY_IAM', 'CAPABILITY_NAMED_IAM', 'CAPABILITY_AUTO_EXPAND'];
 
+/**
+ * What the mutation steps actually did, as opposed to what was planned.
+ */
+interface MutationOutcome {
+  /** Logical IDs that are back in the stack after the import step */
+  importedResources: string[];
+  /**
+   * Import targets that the final template restore dropped again: removed from
+   * the stack but still live in AWS.
+   */
+  orphanedResources: string[];
+}
+
 function packageVersion(): string {
   try {
     const pkgPath = path.join(__dirname, '..', 'package.json');
@@ -52,6 +68,22 @@ function packageVersion(): string {
   } catch {
     return 'unknown';
   }
+}
+
+/**
+ * Record any orphaned import targets on the result. Returns whether the run
+ * should be reported as a success.
+ */
+function reportOrphans(result: RemediationResult, outcome: MutationOutcome): boolean {
+  if (outcome.orphanedResources.length === 0) return true;
+
+  result.errors.push(
+    `Orphaned: ${outcome.orphanedResources.join(', ')} — removed from the stack but still live in AWS. `
+    + 'These resources reference a resource that was permanently removed, and that reference could not '
+    + 'be resolved to a literal value. Import them manually with an IMPORT change set whose template '
+    + 'drops the stale reference.',
+  );
+  return false;
 }
 
 /**
@@ -466,18 +498,18 @@ export async function remediate(
     if (spinner) spinner.start('Processing...');
 
     // Execute Steps 6-10 with checkpoint tracking
-    await executeMutationSteps(
+    const outcome = await executeMutationSteps(
       client, options, stackInfo, originalTemplate, originalTemplateBody,
       allDriftedResources, decisions, allImportable, logicalIdsToRemove,
       capabilities, checkpoint, log,
     );
 
-    result.success = true;
-    result.remediatedResources = allImportable.map((r) => r.LogicalResourceId);
+    result.remediatedResources = outcome.importedResources;
     result.removedResources = [
       ...decisions.remove.map((r) => r.logicalResourceId),
       ...permanentCascade.map((c) => c.logicalResourceId),
     ];
+    result.success = reportOrphans(result, outcome);
 
     if (options.verbose) {
       console.log(`Remediation complete. Recovery checkpoint can be removed: ${backupPath}`);
@@ -523,14 +555,29 @@ async function executeMutationSteps(
   resumeState?: {
     retainTemplate?: CloudFormationTemplate;
     resolvedValues?: Map<string, unknown>;
+    deletedResolvedValues?: Map<string, unknown>;
     removalTemplate?: CloudFormationTemplate;
   },
-): Promise<void> {
+): Promise<MutationOutcome> {
   let retainTemplate = resumeState?.retainTemplate;
   let resolvedValues = resumeState?.resolvedValues ?? new Map<string, unknown>();
   let removalTemplate = resumeState?.removalTemplate;
+  // Values resolved for DELETED resources in Step 6. Kept apart from Step 7's
+  // map because they are only ever applied to import targets.
+  let deletedResolvedValues = resumeState?.deletedResolvedValues ?? new Map<string, unknown>();
+
+  const outcome: MutationOutcome = { importedResources: [], orphanedResources: [] };
 
   const shouldRun = (step: RemediationStep) => !startFromStep || step >= startFromStep;
+
+  // Resources leaving the stack for good — import targets must not reference them.
+  const permanentlyRemovedIds = new Set(decisions.remove.map((r) => r.logicalResourceId));
+  const importTargets: ImportTarget[] = allImportable.map((r) => ({
+    logicalResourceId: r.LogicalResourceId,
+    actualProperties: decisions.autofix.find(
+      (a) => a.logicalResourceId === r.LogicalResourceId,
+    )?.actualProperties,
+  }));
 
   // Step 6: Set DeletionPolicy: Retain on all resources, then remove DELETED resources.
   if (shouldRun(RemediationStep.RETAIN_AND_REMOVE_DELETED)) {
@@ -549,18 +596,18 @@ async function executeMutationSteps(
         const cascadeDeps = analyzeCascadeRemovals(originalTemplate, deletedLogicalIds);
         const cascadeDepIds = new Set(cascadeDeps.map((c) => c.logicalResourceId));
 
+        const cascadeResolvedValues = new Map<string, unknown>();
+
+        // Populate Ref resolved values from DELETED resource physical IDs
+        for (const deletedResource of allDriftedResources) {
+          if (deletedLogicalIds.has(deletedResource.logicalResourceId) && deletedResource.physicalResourceId) {
+            cascadeResolvedValues.set(`Ref:${deletedResource.logicalResourceId}`, deletedResource.physicalResourceId);
+          }
+        }
+
         if (cascadeDepIds.size > 0) {
           // Phase 1: Resolve broken refs in cascade deps via CloudControl (with placeholder fallback) and set Retain.
           log(`Phase 1: Resolving properties for ${cascadeDepIds.size} cascade-dependent resources...`);
-
-          const cascadeResolvedValues = new Map<string, unknown>();
-
-          // Populate Ref resolved values from DELETED resource physical IDs
-          for (const deletedResource of allDriftedResources) {
-            if (deletedLogicalIds.has(deletedResource.logicalResourceId) && deletedResource.physicalResourceId) {
-              cascadeResolvedValues.set(`Ref:${deletedResource.logicalResourceId}`, deletedResource.physicalResourceId);
-            }
-          }
 
           // Try CloudControl for each cascade dep — fall back to placeholders on failure
           for (const cascadeDep of cascadeDeps) {
@@ -639,6 +686,10 @@ async function executeMutationSteps(
           originalTemplate, deletedLogicalIds, new Map(),
         );
         retainTemplate = template;
+
+        // Steps 9 and 10 need these to rebuild import targets that referenced
+        // the DELETED resources.
+        deletedResolvedValues = cascadeResolvedValues;
       }
 
       const retainedCount = Object.keys(retainTemplate!.Resources || {}).length;
@@ -653,6 +704,7 @@ async function executeMutationSteps(
 
       // Save intermediate state
       checkpoint.retainTemplateBody = stringifyTemplate(retainTemplate!);
+      checkpoint.deletedResolvedValuesJson = JSON.stringify([...deletedResolvedValues.entries()]);
     });
   }
 
@@ -742,6 +794,9 @@ async function executeMutationSteps(
     if (!removalTemplate && checkpoint.removalTemplateBody) {
       removalTemplate = parseTemplate(checkpoint.removalTemplateBody);
     }
+    if (deletedResolvedValues.size === 0 && checkpoint.deletedResolvedValuesJson) {
+      deletedResolvedValues = new Map(JSON.parse(checkpoint.deletedResolvedValuesJson));
+    }
 
     await executeStep(RemediationStep.IMPORT_RESOURCES, checkpoint, async () => {
       // On resume, filter out resources already imported (partial import recovery)
@@ -753,6 +808,7 @@ async function executeMutationSteps(
           const msg = `Found ${alreadyImported.length} already-imported resource(s), skipping: ${alreadyImported.map((r) => r.LogicalResourceId).join(', ')}`;
           log(msg);
           console.log(msg);
+          outcome.importedResources.push(...alreadyImported.map((r) => r.LogicalResourceId));
           resourcesToImport = allImportable.filter((r) => !existingIds.has(r.LogicalResourceId));
         }
         if (resourcesToImport.length === 0) {
@@ -773,12 +829,16 @@ async function executeMutationSteps(
         const originalResource = originalTemplate.Resources?.[logicalId];
         if (!originalResource) continue;
 
-        importTemplate.Resources[logicalId] = deepClone(originalResource);
-
+        // Import targets can reference resources that were permanently removed
+        // earlier in this run; those references have to go, or the change set
+        // fails on an unresolved dependency.
         const autofixResource = decisions.autofix.find((r) => r.logicalResourceId === logicalId);
-        if (autofixResource?.actualProperties && Object.keys(autofixResource.actualProperties).length > 0) {
-          importTemplate.Resources[logicalId].Properties = autofixResource.actualProperties;
-        }
+        importTemplate.Resources[logicalId] = detachFromRemovedResources(
+          originalResource,
+          permanentlyRemovedIds,
+          deletedResolvedValues,
+          autofixResource?.actualProperties,
+        );
 
         importTemplate.Resources[logicalId].DeletionPolicy = 'Retain';
       }
@@ -798,8 +858,12 @@ async function executeMutationSteps(
       log('Executing import...');
       await client.executeChangeSet(stackInfo.stackName, changeSetName);
 
+      outcome.importedResources.push(...resourcesToImport.map((r) => r.LogicalResourceId));
       checkpoint.importComplete = true;
     });
+  } else if (allImportable.length > 0 && checkpoint.importComplete) {
+    // Resuming past Step 9 — the import already happened in the earlier run.
+    outcome.importedResources.push(...allImportable.map((r) => r.LogicalResourceId));
   }
 
   // Step 10: Restore template
@@ -808,27 +872,33 @@ async function executeMutationSteps(
     if (resolvedValues.size === 0 && checkpoint.resolvedValuesJson) {
       resolvedValues = new Map(JSON.parse(checkpoint.resolvedValuesJson));
     }
+    if (deletedResolvedValues.size === 0 && checkpoint.deletedResolvedValuesJson) {
+      deletedResolvedValues = new Map(JSON.parse(checkpoint.deletedResolvedValuesJson));
+    }
 
     await executeStep(RemediationStep.RESTORE_TEMPLATE, checkpoint, async () => {
       if (decisions.remove.length > 0) {
         log('Restoring template (excluding removed resources)...');
-        const restoredTemplate = deepClone(originalTemplate);
-        for (const r of decisions.remove) {
-          delete restoredTemplate.Resources[r.logicalResourceId];
-        }
-        const { template: cleanedTemplate } = transformTemplateForRemoval(
-          restoredTemplate,
-          new Set(decisions.remove.map((r) => r.logicalResourceId)),
+        const { template: cleanedTemplate, removedResources } = buildRestoreTemplate(
+          originalTemplate,
+          permanentlyRemovedIds,
+          importTargets,
           resolvedValues,
+          deletedResolvedValues,
         );
-        for (const [logicalId, resource] of Object.entries(cleanedTemplate.Resources || {})) {
-          const originalResource = originalTemplate.Resources?.[logicalId];
-          if (originalResource?.DeletionPolicy) {
-            resource.DeletionPolicy = originalResource.DeletionPolicy;
-          } else {
-            delete resource.DeletionPolicy;
-          }
+
+        // An import target swept out by the cascade is orphaned: gone from the
+        // stack, still live in AWS. Report it instead of claiming success.
+        const orphaned = importTargets
+          .map((t) => t.logicalResourceId)
+          .filter((id) => removedResources.includes(id));
+        if (orphaned.length > 0) {
+          outcome.orphanedResources.push(...orphaned);
+          outcome.importedResources = outcome.importedResources.filter(
+            (id) => !orphaned.includes(id),
+          );
         }
+
         await client.updateStack(
           stackInfo.stackName,
           stringifyTemplate(cleanedTemplate),
@@ -846,6 +916,8 @@ async function executeMutationSteps(
       }
     });
   }
+
+  return outcome;
 }
 
 /**
@@ -908,6 +980,7 @@ async function resumeRemediation(
   const resumeState: {
     retainTemplate?: CloudFormationTemplate;
     resolvedValues?: Map<string, unknown>;
+    deletedResolvedValues?: Map<string, unknown>;
     removalTemplate?: CloudFormationTemplate;
   } = {};
 
@@ -916,6 +989,9 @@ async function resumeRemediation(
   }
   if (checkpoint.resolvedValuesJson) {
     resumeState.resolvedValues = new Map(JSON.parse(checkpoint.resolvedValuesJson));
+  }
+  if (checkpoint.deletedResolvedValuesJson) {
+    resumeState.deletedResolvedValues = new Map(JSON.parse(checkpoint.deletedResolvedValuesJson));
   }
   if (checkpoint.removalTemplateBody) {
     resumeState.removalTemplate = parseTemplate(checkpoint.removalTemplateBody);
@@ -934,16 +1010,16 @@ async function resumeRemediation(
     const roleArn = await getOrCreateServiceRole(client, options.yes ?? false, options.verbose ?? false);
     client.setServiceRoleArn(roleArn);
 
-    await executeMutationSteps(
+    const outcome = await executeMutationSteps(
       client, options, stackInfo, originalTemplate, originalTemplateBody,
       allDriftedResources, decisions, allImportable, logicalIdsToRemove,
       capabilities, checkpoint, log,
       nextStep, resumeState,
     );
 
-    result.success = true;
-    result.remediatedResources = allImportable.map((r) => r.LogicalResourceId);
+    result.remediatedResources = outcome.importedResources;
     result.removedResources = decisions.remove.map((r: DriftedResource) => r.logicalResourceId);
+    result.success = reportOrphans(result, outcome);
 
     if (options.verbose) {
       console.log(`Remediation resumed and completed. Recovery checkpoint can be removed: ${checkpoint.checkpointPath}`);

@@ -122,7 +122,7 @@ Mutually exclusive: `--resume` cannot be combined with `--export-plan`, `--apply
 7. **Resolve cross-references** — identifies resources with `Ref`/`GetAtt` pointing to MODIFIED resources being removed. Adds temporary Outputs to resolve those values for later use.
 8. **Remove MODIFIED resources** — removes MODIFIED resources from the template. Replaces broken references with the resolved literal values from step 7. Resources are retained in AWS.
 9. **Import resources** — builds an import template and creates a CloudFormation IMPORT change set to bring the resources back under stack management with their actual current state.
-10. **Restore template** — restores the original template (minus any permanently removed resources), cleaning up temporary Retain policies and resolution Outputs.
+10. **Restore template** — restores the original template (minus any permanently removed resources), cleaning up temporary Retain policies and resolution Outputs. Re-imported resources are kept out of the removal cascade so they stay in the stack.
 
 ### Cascade dependencies
 
@@ -138,6 +138,19 @@ Common cascade patterns:
 - `AWS::SecretsManager::SecretTargetAttachment` referencing a database via `!Ref`
 - CDK-generated `SecurityGroupIngress`/`Egress` referencing `!GetAtt Database.Endpoint.Port`
 - SNS Subscriptions referencing `!Ref Topic` and `!GetAtt Queue.Arn`
+
+### Resources that are both re-imported and cascade-dependent
+
+A resource can be a re-import target *and* reference a resource being permanently
+removed — an RDS read replica promoted to standalone in AWS still points at a
+primary that was deleted out of band. That stale reference is exactly what the
+re-import drops, so these resources are detached from the removed resource before
+the cascade runs: they keep the properties they were imported with, and their
+`Ref`/`GetAtt` to the removed resource is replaced with the resolved literal value.
+
+If a reference still cannot be resolved, the resource is cascade-removed as before —
+but the run reports it as orphaned (removed from the stack, still live in AWS) and
+exits non-zero, rather than listing it as remediated.
 
 ### Pre-flight checks
 
