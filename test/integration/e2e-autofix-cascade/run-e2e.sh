@@ -166,25 +166,40 @@ section "TEST 2: Final template dropped the stale reference"
 DEPLOYED=$(aws cloudformation get-template --stack-name "$STACK" \
   --template-stage Processed --query 'TemplateBody' --output json)
 
-if echo "$DEPLOYED" | grep -q "SourceTopic"; then
-  fail "2a: Deployed template still references SourceTopic"
-  echo "$DEPLOYED"
-else
-  pass "2a: Deployed template no longer references SourceTopic"
-fi
+# Assert on intrinsic functions, not on the string "SourceTopic" — CloudFormation
+# names physical resources after their logical ID, so the resolved literal ARN
+# legitimately contains it (...-SourceTopic-UdB3qQil5nUu).
+STALE_REFS=$(echo "$DEPLOYED" | jq '[.. | objects | select(has("Ref")) | .Ref]
+  | map(select(. == "SourceTopic")) | length')
+assert_equals "0" "$STALE_REFS" "2a: No Ref to SourceTopic remains"
 
-if echo "$DEPLOYED" | grep -q "DependentQueue"; then
-  pass "2b: Deployed template still declares DependentQueue"
+STALE_GETATTS=$(echo "$DEPLOYED" | jq '[.. | objects | select(has("Fn::GetAtt")) | ."Fn::GetAtt"]
+  | map(if type == "array" then .[0] else split(".")[0] end)
+  | map(select(. == "SourceTopic")) | length')
+assert_equals "0" "$STALE_GETATTS" "2b: No GetAtt on SourceTopic remains"
+
+DECLARED=$(echo "$DEPLOYED" | jq '.Resources | has("SourceTopic")')
+assert_equals "false" "$DECLARED" "2c: SourceTopic no longer declared in the template"
+
+QUEUE_DECLARED=$(echo "$DEPLOYED" | jq '.Resources | has("DependentQueue")')
+assert_equals "true" "$QUEUE_DECLARED" "2d: DependentQueue still declared in the template"
+
+# The detach replaced the intrinsic with the concrete ARN the tag always
+# resolved to at runtime, which is what keeps the queue out of the cascade.
+TAG_VALUE=$(echo "$DEPLOYED" | jq -r '.Resources.DependentQueue.Properties.Tags[]
+  | select(.Key == "SourceTopicArn") | .Value')
+if [[ "$TAG_VALUE" == arn:aws:sns:* ]]; then
+  pass "2e: SourceTopicArn tag holds a resolved literal ARN ($TAG_VALUE)"
 else
-  fail "2b: Deployed template no longer declares DependentQueue"
+  fail "2e: SourceTopicArn tag is not a resolved literal: '$TAG_VALUE'"
 fi
 
 STACK_STATUS=$(aws cloudformation describe-stacks --stack-name "$STACK" \
   --query 'Stacks[0].StackStatus' --output text)
 if [[ "$STACK_STATUS" == *"COMPLETE"* && "$STACK_STATUS" != *"ROLLBACK"* ]]; then
-  pass "2c: Stack is healthy ($STACK_STATUS)"
+  pass "2f: Stack is healthy ($STACK_STATUS)"
 else
-  fail "2c: Stack is in unexpected state: $STACK_STATUS"
+  fail "2f: Stack is in unexpected state: $STACK_STATUS"
 fi
 
 # ======================================================================

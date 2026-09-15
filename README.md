@@ -148,6 +148,16 @@ re-import drops, so these resources are detached from the removed resource befor
 the cascade runs: they keep the properties they were imported with, and their
 `Ref`/`GetAtt` to the removed resource is replaced with the resolved literal value.
 
+Note the trade-off. Normally drift is remediated by restoring the template and
+letting CloudFormation converge the resource back to it. These resources can't be
+restored that way — the template properties are what carry the unresolvable
+reference — so they keep their **actual** AWS properties instead. Any *other*
+drift on that same resource is therefore accepted as the new desired state rather
+than reverted. This matches what a manual `IMPORT` change set would do, and it is
+the only option that can drop a create-only property outright (an RDS replica
+promoted to standalone genuinely has no `SourceDBInstanceIdentifier`; resolving it
+to the deleted primary's ARN would be wrong).
+
 If a reference still cannot be resolved, the resource is cascade-removed as before —
 but the run reports it as orphaned (removed from the stack, still live in AWS) and
 exits non-zero, rather than listing it as remediated.

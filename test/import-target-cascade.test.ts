@@ -38,6 +38,11 @@ const REPLICA_ACTUAL_PROPERTIES = {
 };
 
 describe('detachFromRemovedResources', () => {
+  // Deliberate: actual properties win for a detached target, so other drift on
+  // that resource is accepted rather than reverted. It is the only option that
+  // can drop a create-only property outright — a promoted replica genuinely has
+  // no SourceDBInstanceIdentifier, and resolving it to the deleted primary's ARN
+  // would be wrong. See the README's "both re-imported and cascade-dependent".
   it('prefers non-empty preferred properties over the template properties', () => {
     const resource = replicaStack().Resources.MainReadReplica;
 
