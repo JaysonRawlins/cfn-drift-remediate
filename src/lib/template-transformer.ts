@@ -1,5 +1,11 @@
 import * as yaml from 'yaml-cfn';
-import { CascadeRemoval, CloudFormationTemplate, TransformResult } from './types';
+import {
+  CascadeRemoval,
+  CloudFormationResource,
+  CloudFormationTemplate,
+  ImportTarget,
+  TransformResult,
+} from './types';
 import { deepClone } from './utils';
 
 /**
@@ -613,6 +619,141 @@ export function transformTemplateForRemoval(
     removedResources,
     resolvedReferences: resolvedValues,
   };
+}
+
+/**
+ * Check whether a resource's DependsOn names any of the given logical IDs.
+ */
+function dependsOnAny(resource: CloudFormationResource, logicalIds: Set<string>): boolean {
+  if (typeof resource.DependsOn === 'string') {
+    return logicalIds.has(resource.DependsOn);
+  }
+  if (Array.isArray(resource.DependsOn)) {
+    return resource.DependsOn.some((dep) => logicalIds.has(dep));
+  }
+  return false;
+}
+
+/**
+ * Check whether a resource still points at any of the given logical IDs, either
+ * through an intrinsic function in its Properties or through DependsOn.
+ */
+export function referencesRemovedResources(
+  resource: CloudFormationResource,
+  removedLogicalIds: Set<string>,
+): boolean {
+  if (removedLogicalIds.size === 0) return false;
+  if (resource.Properties && hasUnresolvedReferences(resource.Properties, removedLogicalIds)) {
+    return true;
+  }
+  return dependsOnAny(resource, removedLogicalIds);
+}
+
+/**
+ * Cut a resource loose from resources that are leaving the stack for good.
+ *
+ * A resource can be both a re-import target and a dependent of a removed
+ * resource — an RDS read replica promoted to standalone in AWS still points at
+ * the primary that was deleted out of band. That stale reference is exactly what
+ * the re-import is meant to drop, so it has to go before the removal cascade
+ * sees it.
+ *
+ * `preferredProperties` (the resource's actual state as read from AWS) replaces
+ * the template properties whenever they are supplied and non-empty. Whatever
+ * properties are used then have their references to removed resources swapped
+ * for resolved literal values, where a resolved value is known. DependsOn
+ * entries naming a removed resource are always dropped.
+ */
+export function detachFromRemovedResources(
+  resource: CloudFormationResource,
+  removedLogicalIds: Set<string>,
+  resolvedValues: Map<string, unknown>,
+  preferredProperties?: Record<string, unknown>,
+): CloudFormationResource {
+  const detached = deepClone(resource);
+
+  const properties = preferredProperties && Object.keys(preferredProperties).length > 0
+    ? deepClone(preferredProperties)
+    : detached.Properties;
+
+  if (properties !== undefined) {
+    detached.Properties = hasUnresolvedReferences(properties, removedLogicalIds)
+      ? resolvePropertyValue(properties, removedLogicalIds, resolvedValues, false) as Record<string, unknown>
+      : properties;
+  }
+
+  if (typeof detached.DependsOn === 'string') {
+    if (removedLogicalIds.has(detached.DependsOn)) {
+      delete detached.DependsOn;
+    }
+  } else if (Array.isArray(detached.DependsOn)) {
+    detached.DependsOn = detached.DependsOn.filter((dep) => !removedLogicalIds.has(dep));
+    if (detached.DependsOn.length === 0) {
+      delete detached.DependsOn;
+    }
+  }
+
+  return detached;
+}
+
+/**
+ * Build the final template to restore after a remediation that permanently
+ * removed resources: the original template minus those resources, with their
+ * references cleaned up and the original DeletionPolicy values put back.
+ *
+ * Re-import targets are detached from the removed resources first so the removal
+ * cascade does not sweep them back out of the stack — without that they end up
+ * orphaned, dropped from the stack but still live in AWS. A target whose stale
+ * references still cannot be resolved is cascade-removed as before and named in
+ * `removedResources`, so the caller can report it rather than claim success.
+ *
+ * `importTargetResolvedValues` is deliberately separate from `resolvedValues`:
+ * values resolved for DELETED resources apply only to the re-import targets.
+ * Feeding them to the cascade as well would rescue plain cascade dependents too,
+ * which are meant to be removed for good and are reported that way up front.
+ */
+export function buildRestoreTemplate(
+  originalTemplate: CloudFormationTemplate,
+  removedLogicalIds: Set<string>,
+  importTargets: ImportTarget[],
+  resolvedValues: Map<string, unknown>,
+  importTargetResolvedValues: Map<string, unknown> = resolvedValues,
+): TransformResult {
+  const base = deepClone(originalTemplate);
+
+  for (const logicalId of removedLogicalIds) {
+    delete base.Resources?.[logicalId];
+  }
+
+  for (const target of importTargets) {
+    const resource = base.Resources?.[target.logicalResourceId];
+    // Only the targets caught up in the removal keep their actual properties.
+    // Everything else stays on the template properties, because drift is
+    // remediated by restoring the template and letting CloudFormation converge.
+    if (!resource || !referencesRemovedResources(resource, removedLogicalIds)) continue;
+
+    base.Resources[target.logicalResourceId] = detachFromRemovedResources(
+      resource,
+      removedLogicalIds,
+      importTargetResolvedValues,
+      target.actualProperties,
+    );
+  }
+
+  const result = transformTemplateForRemoval(base, removedLogicalIds, resolvedValues);
+
+  // transformTemplateForRemoval sets Retain on everything as a safety net; the
+  // restored template should carry whatever the original template declared.
+  for (const [logicalId, resource] of Object.entries(result.template.Resources || {})) {
+    const original = originalTemplate.Resources?.[logicalId];
+    if (original?.DeletionPolicy) {
+      resource.DeletionPolicy = original.DeletionPolicy;
+    } else {
+      delete resource.DeletionPolicy;
+    }
+  }
+
+  return result;
 }
 
 /**

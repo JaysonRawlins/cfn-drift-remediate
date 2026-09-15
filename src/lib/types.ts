@@ -211,6 +211,17 @@ export interface CloudFormationResource {
 }
 
 /**
+ * A resource being brought back into the stack via import, paired with the
+ * properties it actually has in AWS (when drift detection could read them).
+ */
+export interface ImportTarget {
+  /** Logical resource ID in the template */
+  logicalResourceId: string;
+  /** Properties of the resource as it currently exists in AWS, if known */
+  actualProperties?: Record<string, unknown>;
+}
+
+/**
  * Result of transforming a template for drift remediation
  */
 export interface TransformResult {
@@ -258,6 +269,8 @@ export interface RecoveryCheckpoint {
   decisionsJson?: string;
   /** Serialized ResourceToImport[] for resume */
   resourcesToImportJson?: string;
+  /** JSON.stringify([...entries]) of values resolved for DELETED resources in Step 6 */
+  deletedResolvedValuesJson?: string;
   /** File path where this checkpoint is saved */
   checkpointPath?: string;
 }

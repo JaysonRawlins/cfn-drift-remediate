@@ -1,0 +1,28 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  E2E fixture for issue #62. SourceTopic is deleted out of band (DELETED drift,
+  default decision "remove") while DependentQueue is retagged out of band
+  (MODIFIED drift, default decision "autofix"). DependentQueue references
+  SourceTopic, so it is simultaneously a re-import target and a cascade
+  dependent of a resource being permanently removed.
+
+Resources:
+  SourceTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: e2e-autofix-cascade-topic
+
+  DependentQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      Tags:
+        - Key: Environment
+          Value: test
+        - Key: SourceTopicArn
+          Value: !Ref SourceTopic
+
+Outputs:
+  TopicArn:
+    Value: !Ref SourceTopic
+  QueueUrl:
+    Value: !Ref DependentQueue
