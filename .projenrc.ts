@@ -4,6 +4,12 @@ import { NpmAccess } from 'projen/lib/javascript';
 
 const minNodeVersion = '20.19.0';
 
+// Aikido Safe-Chain install script pin (1.5.3 published 2026-05-12). See
+// workflowBootstrapSteps below for what this is and the update procedure for
+// changing these two constants.
+const safeChainVersion = '1.5.3';
+const safeChainInstallSha256 = '0107cbbbf90159379756157e902acae512d62ffbd174307e42c5fe9f266792d3';
+
 const project = new typescript.TypeScriptProject({
   name: '@jjrawlins/cfn-drift-remediate',
   description: 'CLI tool to remediate CloudFormation drift by re-importing drifted resources with their actual state',
@@ -52,16 +58,53 @@ const project = new typescript.TypeScriptProject({
   // is OS-detection bash (no Node dependency); setup-node populates real yarn
   // afterward. Env var written via $GITHUB_ENV so subsequent install steps see it.
   //
-  // Pinned to 1.5.3 (published 2026-05-12) — `releases/latest` would let
-  // an AikidoSec compromise (or accidental release) trigger an unreviewed
-  // rollout into every build. Bump via .projenrc.ts edit after reviewing
-  // the upstream changelog.
+  // SUPPLY-CHAIN PIN (safeChainVersion / safeChainInstallSha256, top of file).
+  //
+  // Pinned to a tagged release — `releases/latest` would let an AikidoSec
+  // compromise (or an accidental release) roll unreviewed into every build.
+  // Pinning alone is not enough: a release asset is mutable server-side, so a
+  // tampered artifact served from a pinned URL would still execute silently.
+  // That is the Codecov bash-uploader failure (April 2021) — same install
+  // pattern, same floating trust, detected only when an outsider compared the
+  // served script against source. So the script is downloaded, its SHA-256
+  // checked against the constant above, and only then executed. Verification
+  // failure exits non-zero and fails the job (default shell is `bash -e`).
+  //
+  // The chain bottoms out: the release-pipeline copy of the script has the
+  // per-platform binary SHA-256s baked in (the copy on `main` leaves them
+  // empty, and verify_checksum no-ops on empty), and it hard-fails if the
+  // downloaded binary does not match. Pinning the script hash therefore also
+  // pins the binary — we are not just verifying the wrapper.
+  //
+  // Downloaded to $RUNNER_TEMP, NOT the workspace: an untracked file in the
+  // checkout would be picked up by the build workflow's `git add .` mutation
+  // detection.
+  //
+  // UPDATE PROCEDURE (manual by design — Dependabot cannot track a curl URL,
+  // and the github-actions ecosystem is alerts-only here; see the Dependabot
+  // block below):
+  //   1. Review the upstream changelog for the new tag.
+  //   2. Recompute and cross-check the hash — do NOT just trust the asset:
+  //        V=<new-tag>
+  //        curl -fsSL -o /tmp/a.sh https://github.com/AikidoSec/safe-chain/releases/download/$V/install-safe-chain.sh
+  //        curl -fsSL -o /tmp/b.sh https://raw.githubusercontent.com/AikidoSec/safe-chain/$V/install-scripts/install-safe-chain.sh
+  //        diff /tmp/b.sh /tmp/a.sh   # expect ONLY the SHA256_* values and VERSION= to differ
+  //        shasum -a 256 /tmp/a.sh
+  //      A diff hunk anywhere else means the released asset does not match the
+  //      tagged source. Stop and investigate; do not bump.
+  //   3. Update safeChainVersion + safeChainInstallSha256, `npx projen`, PR.
+  // Cadence: on upstream release, or quarterly review if none. Verified for
+  // 1.5.3 on 2026-09-14 — release asset differed from the 1.5.3 tag source
+  // only in the eight SHA256_* binary hashes and `VERSION=1.5.3`.
   workflowBootstrapSteps: [
     {
-      name: 'Install Aikido Safe-Chain 1.5.3 (in-flight malware scanner, 7d minimum age)',
+      name: `Install Aikido Safe-Chain ${safeChainVersion} (in-flight malware scanner, 7d minimum age)`,
       run: [
+        'set -euo pipefail',
         'echo "SAFE_CHAIN_MINIMUM_PACKAGE_AGE_HOURS=168" >> $GITHUB_ENV',
-        'curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.5.3/install-safe-chain.sh | sh -s -- --ci',
+        `curl -fsSL -o "$RUNNER_TEMP/install-safe-chain.sh" https://github.com/AikidoSec/safe-chain/releases/download/${safeChainVersion}/install-safe-chain.sh`,
+        `echo "${safeChainInstallSha256}  $RUNNER_TEMP/install-safe-chain.sh" | sha256sum -c -`,
+        'sh "$RUNNER_TEMP/install-safe-chain.sh" --ci',
       ].join('\n'),
     },
   ],
